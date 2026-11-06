@@ -5,36 +5,62 @@ import uuid
 from django.db import migrations, models
 
 
+def create_survey_mission_if_not_exists(apps, schema_editor):
+    tables = schema_editor.connection.introspection.table_names()
+    if "survey_missions" not in tables:
+        from django.apps import apps as global_apps
+        model = global_apps.get_model("core", "SurveyMission")
+        schema_editor.create_model(model)
+
+
+def drop_survey_mission_if_exists(apps, schema_editor):
+    tables = schema_editor.connection.introspection.table_names()
+    if "survey_missions" in tables:
+        from django.apps import apps as global_apps
+        model = global_apps.get_model("core", "SurveyMission")
+        schema_editor.delete_model(model)
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('core', '0001_initial'),
+        ("core", "0001_initial"),
     ]
 
     operations = [
-        migrations.CreateModel(
-            name='SurveyMission',
-            fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('user_id', models.UUIDField(blank=True, help_text='Supabase auth.users UUID', null=True)),
-                ('title', models.CharField(default='Survey Mission', max_length=255)),
-                ('captured_at', models.DateTimeField(default=django.utils.timezone.now)),
-                ('total_scanned_count', models.IntegerField(default=0)),
-                ('blight_count', models.IntegerField(default=0)),
-                ('whitehead_count', models.IntegerField(default=0)),
-                ('healthy_count', models.IntegerField(default=0)),
-                ('average_confidence', models.FloatField(default=0.0)),
-                ('center_lat', models.FloatField(default=0.0)),
-                ('center_lng', models.FloatField(default=0.0)),
-                ('surveyed_area_m2', models.FloatField(default=0.0)),
-                ('surveyed_area_ha', models.FloatField(default=0.0)),
-                ('disease_points', models.JSONField(blank=True, default=list, help_text='Array of {lat, lng, timestamp, confidence, disease_label} objects')),
-                ('boundary_points', models.JSONField(blank=True, default=list, help_text='Array of {lat, lng} boundary polygon vertices')),
-                ('created_at', models.DateTimeField(default=django.utils.timezone.now)),
+        migrations.SeparateDatabaseAndState(
+            state_operations=[
+                migrations.CreateModel(
+                    name="SurveyMission",
+                    fields=[
+                        ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                        ("user_id", models.UUIDField(blank=True, help_text="Supabase auth.users UUID", null=True)),
+                        ("title", models.CharField(default="Survey Mission", max_length=255)),
+                        ("captured_at", models.DateTimeField(default=django.utils.timezone.now)),
+                        ("total_scanned_count", models.IntegerField(default=0)),
+                        ("blight_count", models.IntegerField(default=0)),
+                        ("whitehead_count", models.IntegerField(default=0)),
+                        ("healthy_count", models.IntegerField(default=0)),
+                        ("average_confidence", models.FloatField(default=0.0)),
+                        ("center_lat", models.FloatField(default=0.0)),
+                        ("center_lng", models.FloatField(default=0.0)),
+                        ("surveyed_area_m2", models.FloatField(default=0.0)),
+                        ("surveyed_area_ha", models.FloatField(default=0.0)),
+                        ("disease_points", models.JSONField(blank=True, default=list, help_text="Array of {lat, lng, timestamp, confidence, disease_label} objects")),
+                        ("boundary_points", models.JSONField(blank=True, default=list, help_text="Array of {lat, lng} boundary polygon vertices")),
+                        ("created_at", models.DateTimeField(default=django.utils.timezone.now)),
+                    ],
+                    options={
+                        "db_table": "survey_missions",
+                        "ordering": ["-captured_at"],
+                    },
+                ),
             ],
-            options={
-                'db_table': 'survey_missions',
-                'ordering': ['-captured_at'],
-            },
+            database_operations=[
+                migrations.RunPython(
+                    create_survey_mission_if_not_exists,
+                    reverse_code=drop_survey_mission_if_exists,
+                ),
+            ],
         ),
     ]
