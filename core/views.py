@@ -15,10 +15,6 @@ from .serializers import (
     CloudInferenceResultSerializer,
     AnalyticsReportSerializer
 )
-from inference.pipeline import CloudInferencePipeline
-
-pipeline = CloudInferencePipeline()
-
 from inference.tasks import process_cloud_inference_task
 
 

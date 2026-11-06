@@ -281,6 +281,11 @@ class CloudInferencePipeline:
         if has_unet or has_resnet:
             try:
                 import torch
+                try:
+                    torch.set_num_threads(1)
+                    torch.set_num_interop_threads(1)
+                except Exception:
+                    pass
                 from .models.unet import RiceCanopyUNet
                 from .models.resnet import RiceDiscolorationResNet50
 
@@ -774,3 +779,26 @@ class CloudInferencePipeline:
             "processed_at": timezone.now(),
             "status": "COMPLETED"
         }
+
+
+_pipeline_singleton: Optional["CloudInferencePipeline"] = None
+
+
+def get_inference_pipeline(
+    yolo_weights: Optional[str] = None,
+    unet_weights: Optional[str] = None,
+    resnet_weights: Optional[str] = None,
+) -> CloudInferencePipeline:
+    """
+    Returns a process-wide singleton instance of CloudInferencePipeline, preventing
+    duplicate weights from being loaded into RAM concurrently.
+    """
+    global _pipeline_singleton
+    if _pipeline_singleton is None:
+        _pipeline_singleton = CloudInferencePipeline(
+            yolo_weights=yolo_weights,
+            unet_weights=unet_weights,
+            resnet_weights=resnet_weights,
+        )
+    return _pipeline_singleton
+

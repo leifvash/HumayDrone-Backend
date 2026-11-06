@@ -2,10 +2,9 @@ import logging
 from celery import shared_task
 from django.utils import timezone
 from core.models import ImageCapture, EdgeInferenceResult, CloudInferenceResult
-from inference.pipeline import CloudInferencePipeline
+from inference.pipeline import get_inference_pipeline
 
 logger = logging.getLogger(__name__)
-pipeline = CloudInferencePipeline()
 
 @shared_task(bind=True, max_retries=3)
 def process_cloud_inference_task(self, image_id: int, edge_data: list = None):
@@ -31,6 +30,7 @@ def process_cloud_inference_task(self, image_id: int, edge_data: list = None):
     cloud_result.save(update_fields=['status'])
 
     try:
+        pipeline = get_inference_pipeline()
         if not pipeline.is_real_models_loaded:
             pipeline._load_models_if_available()
 
