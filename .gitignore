@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.sqlite3
+media/captures/
+media/masks/
+*.log
+.env
