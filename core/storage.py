@@ -62,11 +62,16 @@ class SupabaseMediaStorage(Storage):
     def _normalize_name(self, name: str) -> str:
         return str(name or "").replace("\\", "/").lstrip("/")
 
+    def _is_legacy_jwt(self, key: str) -> bool:
+        """Legacy service_role JWTs have 3 dot-separated segments starting with 'eyJ'; sb_secret_ keys are not JWTs."""
+        return bool(key and not key.startswith("sb_") and key.count(".") == 2 and key.startswith("eyJ"))
+
     def _headers(self, extra: Optional[dict] = None) -> dict:
-        headers = {
-            "Authorization": f"Bearer {self.service_role_key}",
-            "apikey": self.service_role_key,
-        }
+        # New Supabase sb_secret_ / sb_publishable_ keys must ONLY be sent in `apikey`
+        # (sending a non-JWT sb_secret_ in Authorization: Bearer causes Storage 400/401 errors).
+        headers = {"apikey": self.service_role_key}
+        if self._is_legacy_jwt(self.service_role_key):
+            headers["Authorization"] = f"Bearer {self.service_role_key}"
         if extra:
             headers.update(extra)
         return headers

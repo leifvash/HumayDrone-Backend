@@ -251,7 +251,11 @@ class CloudInferencePipeline:
                 mask_bytes = bytes(buf.tobytes())
 
             use_remote_storage = bool(
-                os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+                os.environ.get("SUPABASE_URL")
+                and (
+                    os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+                    or os.environ.get("SUPABASE_SECRET_KEY")
+                )
             )
             if not use_remote_storage:
                 media_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "media"))

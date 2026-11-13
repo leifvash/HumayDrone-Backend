@@ -325,6 +325,24 @@ class HumayDroneBackendTestCase(TestCase):
         resp_cm.__exit__ = lambda s, *a: None
         resp_cm.read.return_value = sample_bytes
 
+        storage_new = SupabaseMediaStorage(
+            supabase_url="https://example.supabase.co",
+            service_role_key="sb_secret_new_format_key",
+            bucket="inference-media",
+        )
+        new_headers = storage_new._headers()
+        self.assertEqual(new_headers, {"apikey": "sb_secret_new_format_key"})
+        self.assertNotIn("Authorization", new_headers)
+
+        storage_legacy = SupabaseMediaStorage(
+            supabase_url="https://example.supabase.co",
+            service_role_key="eyJhbGciOiJIUzI1NiJ9.payload.sig",
+            bucket="inference-media",
+        )
+        legacy_headers = storage_legacy._headers()
+        self.assertEqual(legacy_headers["apikey"], "eyJhbGciOiJIUzI1NiJ9.payload.sig")
+        self.assertEqual(legacy_headers["Authorization"], "Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig")
+
         with patch.object(storage, "exists", return_value=False), patch(
             "core.storage.urllib.request.urlopen", return_value=resp_cm
         ):

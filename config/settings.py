@@ -117,9 +117,18 @@ MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 # Supabase Integration (Dedicated public 'inference-media' bucket & Bearer JWT auth)
+# Supports both legacy anon/service_role JWTs and new sb_publishable_/sb_secret_ keys
 SUPABASE_URL = os.environ.get('SUPABASE_URL', '').strip().rstrip('/')
-SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '').strip()
-SUPABASE_ANON_KEY = os.environ.get('SUPABASE_ANON_KEY', '').strip()
+SUPABASE_SERVICE_ROLE_KEY = (
+    os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
+    or os.environ.get('SUPABASE_SECRET_KEY')
+    or ''
+).strip()
+SUPABASE_ANON_KEY = (
+    os.environ.get('SUPABASE_ANON_KEY')
+    or os.environ.get('SUPABASE_PUBLISHABLE_KEY')
+    or ''
+).strip()
 SUPABASE_STORAGE_BUCKET = os.environ.get('SUPABASE_STORAGE_BUCKET', 'inference-media').strip() or 'inference-media'
 SUPABASE_JWT_SECRET = os.environ.get('SUPABASE_JWT_SECRET', '').strip()
 
