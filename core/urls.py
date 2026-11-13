@@ -7,6 +7,7 @@ from .views import (
     ImageUploadAndInferView,
     ImageDetailView,
     ImageRetryInferenceView,
+    ImageReviewView,
     FlightAnalyticsReportView,
 )
 
@@ -20,6 +21,7 @@ urlpatterns = [
     path('images/upload/', ImageUploadAndInferView.as_view(), name='image-upload-infer'),
     path('images/<int:image_id>/', ImageDetailView.as_view(), name='image-detail'),
     path('images/<int:image_id>/retry/', ImageRetryInferenceView.as_view(), name='image-retry'),
+    path('images/<int:image_id>/review/', ImageReviewView.as_view(), name='image-review'),
     path('flights/<int:flight_id>/report/', FlightAnalyticsReportView.as_view(), name='flight-report'),
 ]
 

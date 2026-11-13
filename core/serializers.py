@@ -36,7 +36,9 @@ class CloudInferenceResultSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'model_used', 'status', 'segmentation_mask',
             'severity_score', 'classification_label', 'confidence_score',
-            'treatment_recommendation', 'error_message', 'processed_at'
+            'treatment_recommendation', 'error_message', 'processed_at',
+            'review_status', 'review_notes', 'reviewed_label',
+            'reviewed_by', 'reviewed_at',
         ]
 
 class ImageCaptureSerializer(serializers.ModelSerializer):
@@ -53,12 +55,26 @@ class DroneFlightSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DroneFlight
-        fields = ['id', 'title', 'start_time', 'end_time', 'flight_path', 'telemetry_log', 'is_completed', 'images_count']
+        fields = [
+            'id', 'title', 'survey_mission_id', 'start_time', 'end_time',
+            'flight_path', 'telemetry_log', 'is_completed', 'images_count',
+        ]
 
 class AnalyticsReportSerializer(serializers.ModelSerializer):
     flight_id = serializers.IntegerField(source='flight.id', read_only=True)
+    flight_title = serializers.CharField(source='flight.title', read_only=True)
+    survey_mission_id = serializers.UUIDField(source='flight.survey_mission_id', read_only=True)
 
     class Meta:
         model = AnalyticsReport
-        fields = ['id', 'flight_id', 'created_at', 'summary_statistics', 'severity_map', 'recommendations']
+        fields = [
+            'id',
+            'flight_id',
+            'flight_title',
+            'survey_mission_id',
+            'created_at',
+            'summary_statistics',
+            'severity_map',
+            'recommendations',
+        ]
 

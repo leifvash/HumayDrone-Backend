@@ -48,18 +48,23 @@ class YoloV8TFLiteDetector:
     IOU_THRESHOLD = 0.45
     NUM_THREADS = 4
 
-    # Matches YoloV8Detector.kt LABELS while normalizing "Whitehead" -> "White Head" for pipeline consistency
+    # Matches 3 active classes used across mobile edge, cloud backend, and web app.
     RAW_LABELS = [
         "Healthy",
         "Bacterial Leaf Blight",
-        "Dead Heart",
         "Whitehead",
     ]
 
     LABELS = [
         "Healthy",
         "Bacterial Leaf Blight",
-        "Dead Heart",
+        "White Head",
+    ]
+
+    LEGACY_4_CLASS_LABELS = [
+        "Healthy",
+        "Bacterial Leaf Blight",
+        None,  # Excluded legacy Dead Heart index 2
         "White Head",
     ]
 
@@ -248,6 +253,81 @@ class YoloV8TFLiteDetector:
             iou_threshold=iou_threshold,
         )
 
+    def detect_tiled_with_raw_summary(
+        self,
+        image: Union[str, np.ndarray],
+        confidence_threshold: Optional[float] = None,
+        iou_threshold: Optional[float] = None,
+        tile_threshold: int = 1400,
+        overlap: float = 0.2,
+    ) -> Tuple[List[DetectionResult], Dict[str, Any]]:
+        """
+        Runs full-frame inference plus 2x2 overlapping tiles for large aerial images
+        so small panicle / leaf-tip lesions are not lost in 640x640 downscaling.
+        """
+        if isinstance(image, str):
+            img_bgr = self._read_image_bgr(image)
+        else:
+            img_bgr = self._ensure_bgr_uint8(image)
+
+        if img_bgr is None or img_bgr.size == 0:
+            return [], {"max_confidence": 0.0, "best_class_index": 0, "best_label": "Healthy"}
+
+        orig_h, orig_w = img_bgr.shape[:2]
+        full_dets, best_summary = self.detect_with_raw_summary(
+            img_bgr,
+            confidence_threshold=confidence_threshold,
+            iou_threshold=iou_threshold,
+        )
+
+        if max(orig_w, orig_h) < tile_threshold or min(orig_w, orig_h) < 320:
+            return full_dets, best_summary
+
+        # Skip tiling if the loaded model is a non-rice export (e.g. COCO 80-class)
+        if best_summary.get("ignored_non_rice_model"):
+            return [], best_summary
+
+        tile_w = max(320, int(round(orig_w * (0.5 + overlap / 2.0))))
+        tile_h = max(320, int(round(orig_h * (0.5 + overlap / 2.0))))
+        x_starts = sorted({0, max(0, orig_w - tile_w)})
+        y_starts = sorted({0, max(0, orig_h - tile_h)})
+
+        all_detections = list(full_dets)
+        for y1 in y_starts:
+            y2 = min(orig_h, y1 + tile_h)
+            for x1 in x_starts:
+                x2 = min(orig_w, x1 + tile_w)
+                tile_bgr = img_bgr[y1:y2, x1:x2]
+                tile_dets, tile_summary = self.detect_with_raw_summary(
+                    tile_bgr,
+                    confidence_threshold=confidence_threshold,
+                    iou_threshold=iou_threshold,
+                )
+                if float(tile_summary.get("max_confidence", 0.0)) > float(
+                    best_summary.get("max_confidence", 0.0)
+                ):
+                    best_summary = tile_summary
+                for det in tile_dets:
+                    bx1, by1, bx2, by2 = det.box
+                    all_detections.append(
+                        DetectionResult(
+                            class_index=det.class_index,
+                            label=det.label,
+                            confidence=det.confidence,
+                            box=[
+                                float(np.clip(bx1 + x1, 0.0, float(orig_w))),
+                                float(np.clip(by1 + y1, 0.0, float(orig_h))),
+                                float(np.clip(bx2 + x1, 0.0, float(orig_w))),
+                                float(np.clip(by2 + y1, 0.0, float(orig_h))),
+                            ],
+                        )
+                    )
+
+        nms_thresh = self.iou_threshold if iou_threshold is None else float(iou_threshold)
+        merged = self.apply_nms(all_detections, nms_thresh)
+        best_summary["tiled_inference"] = True
+        return merged, best_summary
+
     def decode_output(
         self,
         output_tensor: np.ndarray,
@@ -296,8 +376,28 @@ class YoloV8TFLiteDetector:
             neginf=0.0,
         )
 
-        num_classes = min(len(self.LABELS), num_features - 4)
-        class_scores = anchors[:, 4 : 4 + num_classes]
+        feature_classes = num_features - 4
+        if feature_classes > len(self.LEGACY_4_CLASS_LABELS):
+            # Reject incompatible non-rice exports (such as 80-class COCO weights)
+            # instead of slicing channels 0..3 into false rice disease boxes.
+            return [], {
+                "max_confidence": 0.0,
+                "best_class_index": 0,
+                "best_label": "Healthy",
+                "output_shape": list(output_tensor.shape),
+                "num_anchors": num_anchors,
+                "num_classes": feature_classes,
+                "ignored_non_rice_model": True,
+            }
+
+        active_labels = (
+            self.LEGACY_4_CLASS_LABELS if feature_classes == 4 else self.LABELS
+        )
+        num_classes = min(len(active_labels), feature_classes)
+        class_scores = anchors[:, 4 : 4 + num_classes].copy()
+        for col_idx, col_label in enumerate(active_labels[:num_classes]):
+            if col_label is None:
+                class_scores[:, col_idx] = 0.0
 
         best_class_indices = np.argmax(class_scores, axis=1)
         max_confidences = np.max(class_scores, axis=1)
@@ -305,11 +405,16 @@ class YoloV8TFLiteDetector:
         # Summary across all anchors even if below threshold
         overall_best_anchor = int(np.argmax(max_confidences))
         overall_max_conf = float(max_confidences[overall_best_anchor])
-        overall_best_cls = int(best_class_indices[overall_best_anchor]) if overall_max_conf > 0.0 else 0
+        raw_best_cls = int(best_class_indices[overall_best_anchor]) if overall_max_conf > 0.0 else 0
         overall_best_label = (
-            self.LABELS[overall_best_cls]
-            if 0 <= overall_best_cls < len(self.LABELS)
-            else "Unknown"
+            active_labels[raw_best_cls]
+            if 0 <= raw_best_cls < len(active_labels) and active_labels[raw_best_cls]
+            else "Healthy"
+        )
+        overall_best_cls = (
+            self.LABELS.index(overall_best_label)
+            if overall_best_label in self.LABELS
+            else 0
         )
         raw_summary = {
             "max_confidence": max(0.0, overall_max_conf),
@@ -328,8 +433,19 @@ class YoloV8TFLiteDetector:
         candidate_detections: List[DetectionResult] = []
 
         for idx in passing_indices:
-            best_class_index = int(best_class_indices[idx])
+            raw_cls_index = int(best_class_indices[idx])
             max_confidence = float(max_confidences[idx])
+
+            label = (
+                active_labels[raw_cls_index]
+                if 0 <= raw_cls_index < len(active_labels)
+                else None
+            )
+            if not label:
+                continue
+            normalized_cls_index = (
+                self.LABELS.index(label) if label in self.LABELS else raw_cls_index
+            )
 
             cx = float(anchors[idx, 0])
             cy = float(anchors[idx, 1])
@@ -353,15 +469,9 @@ class YoloV8TFLiteDetector:
             right = float(np.clip(x_max_640 * scale_x, 0.0, float(orig_width)))
             bottom = float(np.clip(y_max_640 * scale_y, 0.0, float(orig_height)))
 
-            label = (
-                self.LABELS[best_class_index]
-                if 0 <= best_class_index < len(self.LABELS)
-                else "Unknown"
-            )
-
             candidate_detections.append(
                 DetectionResult(
-                    class_index=best_class_index,
+                    class_index=normalized_cls_index,
                     label=label,
                     confidence=max_confidence,
                     box=[left, top, right, bottom],

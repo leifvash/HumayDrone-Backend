@@ -3,13 +3,21 @@ Django settings for HumayDrone Cloud Backend.
 """
 
 from pathlib import Path
+import importlib.util
 import os
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = 'django-insecure-humaydrone-dev-secret-key-change-in-prod'
-DEBUG = True
-ALLOWED_HOSTS = ['*']
+SECRET_KEY = os.environ.get(
+    'SECRET_KEY',
+    'django-insecure-humaydrone-dev-secret-key-change-in-prod',
+)
+DEBUG = os.environ.get('DEBUG', 'True').lower() in ('true', '1', 'yes')
+ALLOWED_HOSTS = [
+    h.strip()
+    for h in os.environ.get('ALLOWED_HOSTS', '*').split(',')
+    if h.strip()
+] or ['*']
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -31,6 +39,11 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    *(
+        ['whitenoise.middleware.WhiteNoiseMiddleware']
+        if importlib.util.find_spec('whitenoise') is not None
+        else []
+    ),
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -103,6 +116,33 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+# Supabase Integration (Dedicated public 'inference-media' bucket & Bearer JWT auth)
+SUPABASE_URL = os.environ.get('SUPABASE_URL', '').strip().rstrip('/')
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '').strip()
+SUPABASE_ANON_KEY = os.environ.get('SUPABASE_ANON_KEY', '').strip()
+SUPABASE_STORAGE_BUCKET = os.environ.get('SUPABASE_STORAGE_BUCKET', 'inference-media').strip() or 'inference-media'
+SUPABASE_JWT_SECRET = os.environ.get('SUPABASE_JWT_SECRET', '').strip()
+
+_USE_SUPABASE_STORAGE = bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+_HAS_WHITENOISE = importlib.util.find_spec('whitenoise') is not None
+
+STORAGES = {
+    'default': {
+        'BACKEND': (
+            'core.storage.SupabaseMediaStorage'
+            if _USE_SUPABASE_STORAGE
+            else 'django.core.files.storage.FileSystemStorage'
+        ),
+    },
+    'staticfiles': {
+        'BACKEND': (
+            'whitenoise.storage.CompressedManifestStaticFilesStorage'
+            if _HAS_WHITENOISE
+            else 'django.contrib.staticfiles.storage.StaticFilesStorage'
+        ),
+    },
+}
+
 # REST Framework settings
 REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
@@ -123,6 +163,7 @@ SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 CSRF_TRUSTED_ORIGINS = [
     'https://*.onrender.com',
     'https://*.railway.app',
+    'https://*.vercel.app',
     'http://localhost:5173',
     'http://localhost:8443',
     'http://localhost:3000',

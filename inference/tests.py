@@ -86,13 +86,35 @@ class CloudNeuralInferenceTests(TestCase):
         # 3. Test decoding channels-last [1, 8400, 8] with pixel-scale coordinates
         tensor_cl8 = np.zeros((1, 8400, 8), dtype=np.float32)
         tensor_cl8[0, 42, 0:4] = [320.0, 320.0, 128.0, 128.0]
-        tensor_cl8[0, 42, 4 + 3] = 0.91  # Class 3: White Head
+        tensor_cl8[0, 42, 4 + 3] = 0.91  # Legacy class 3: White Head
+        # Legacy class 2 ("Dead Heart") must be suppressed
+        tensor_cl8[0, 43, 0:4] = [100.0, 100.0, 64.0, 64.0]
+        tensor_cl8[0, 43, 4 + 2] = 0.95
         decoded_cl8, _ = detector.decode_output(tensor_cl8, orig_width=640, orig_height=640)
         self.assertEqual(len(decoded_cl8), 1)
         self.assertEqual(decoded_cl8[0].label, "White Head")
         self.assertAlmostEqual(decoded_cl8[0].confidence, 0.91, places=4)
         self.assertAlmostEqual(decoded_cl8[0].box[0], 256.0, places=1)
         self.assertAlmostEqual(decoded_cl8[0].box[2], 384.0, places=1)
+
+        # 4. Test rejecting 80-class COCO [1, 84, 8400] without bogus blight detections
+        tensor_coco = np.zeros((1, 84, 8400), dtype=np.float32)
+        tensor_coco[0, 0:4, 5] = [0.5, 0.5, 0.4, 0.4]
+        tensor_coco[0, 4 + 1, 5] = 0.99
+        decoded_coco, summary_coco = detector.decode_output(tensor_coco, orig_width=640, orig_height=640)
+        self.assertEqual(len(decoded_coco), 0)
+        self.assertTrue(summary_coco.get("ignored_non_rice_model"))
+
+        # 5. Test 3-class PyTorch ResNet-50 architecture instantiation
+        resnet_3cls = RiceDiscolorationResNet50(num_classes=3, pretrained=False)
+        sample_batch = torch.zeros((2, 3, 224, 224), dtype=torch.float32)
+        logits_3cls = resnet_3cls(sample_batch)
+        self.assertEqual(tuple(logits_3cls.shape), (2, 3))
+
+        # 6. Test RiceCanopyUNet forward_logits preserves shape and probability bounds
+        unet_net = RiceCanopyUNet()
+        unet_in = torch.zeros((1, 3, 256, 256), dtype=torch.float32)
+        self.assertEqual(tuple(unet_net.forward_logits(unet_in).shape), (1, 1, 256, 256))
 
     def test_unet_and_resnet_neural_forward_execution(self):
         # Verify U-Net and ResNet-50 execute real forward passes and distinguish healthy vs diseased rice
@@ -129,16 +151,24 @@ class CloudNeuralInferenceTests(TestCase):
             0.5,
         )
 
-    def test_edge_cases_missing_image_and_dead_heart(self):
-        # Missing image path should return graceful COMPLETED fallback
+    def test_edge_cases_missing_image_and_excluded_dead_heart(self):
+        # Missing image path should return graceful COMPLETED fallback for active classes
         missing_res = self.pipeline._run_real_models(
             "non_existent_path_12345.jpg",
-            edge_detections=[{"label": "Dead Heart", "confidence": 0.87}],
+            edge_detections=[{"label": "Bacterial Leaf Blight", "confidence": 0.87}],
         )
         self.assertEqual(missing_res["status"], "COMPLETED")
-        self.assertEqual(missing_res["classification_label"], "Dead Heart")
+        self.assertEqual(missing_res["classification_label"], "Bacterial Leaf Blight")
 
-        # Synthetic Dead Heart image on disk (both canonical and shifted/perturbed coordinates)
+        # Excluded legacy "Dead Heart" hint on missing image normalizes to Healthy (never Dead Heart)
+        excluded_res = self.pipeline._run_real_models(
+            "non_existent_path_12345.jpg",
+            edge_detections=[{"label": "Dead Heart", "confidence": 0.92}],
+        )
+        self.assertEqual(excluded_res["status"], "COMPLETED")
+        self.assertEqual(excluded_res["classification_label"], "Healthy")
+
+        # Synthetic discolored lesion image maps cleanly onto 3-class taxonomy and emits JPEG mask bytes
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             tmp_path = tmp.name
         try:
@@ -146,14 +176,22 @@ class CloudNeuralInferenceTests(TestCase):
             img_bgr[80:240, 110:190] = [30, 65, 150]
             cv2.imwrite(tmp_path, img_bgr)
 
-            dh_res = self.pipeline.process_image(tmp_path)
-            self.assertEqual(dh_res["status"], "COMPLETED")
-            self.assertEqual(dh_res["classification_label"], "Dead Heart")
-            self.assertGreater(dh_res["severity_score"], 0.0)
-            self.assertTrue(len(dh_res["yolo_detections"]) > 0)
+            res = self.pipeline.process_image(tmp_path)
+            self.assertEqual(res["status"], "COMPLETED")
+            self.assertIn(res["classification_label"], ("Bacterial Leaf Blight", "White Head"))
+            self.assertNotEqual(res["classification_label"], "Dead Heart")
+            self.assertGreater(res["severity_score"], 0.0)
+            self.assertTrue(len(res["yolo_detections"]) > 0)
+            self.assertTrue(isinstance(res.get("mask_bytes"), bytes) and len(res["mask_bytes"]) > 0)
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
+
+        # Verify large (>= 1400px) image executes tiled YOLO path cleanly
+        large_img = np.full((1500, 1500, 3), [40, 130, 40], dtype=np.uint8)
+        dets_large, summary_large = self.pipeline.yolo_tflite_detector.detect_tiled_with_raw_summary(large_img)
+        self.assertIsInstance(dets_large, list)
+        self.assertIn("max_confidence", summary_large)
 
     def test_unicode_paths_small_whitehead_and_zero_score_anchors(self):
         # 1. Zero-score anchors must not pass even at confidence_threshold=0.0 (matching YoloV8Detector.kt)

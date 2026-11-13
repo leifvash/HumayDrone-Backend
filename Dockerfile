@@ -33,5 +33,5 @@ RUN mkdir -p /app/media/captures /app/media/masks /app/staticfiles
 
 EXPOSE 8000
 
-# Apply migrations and launch gunicorn (1 worker + 2 threads optimized for Render 512MB free tier RAM)
-CMD ["sh", "-c", "python manage.py migrate --noinput && gunicorn config.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 1 --threads 2 --timeout 120"]
+# Apply migrations, collect static files, and launch gunicorn (1 worker + 4 threads fits Render $25/mo Standard cleanly without duplicating ML RAM)
+CMD ["sh", "-c", "python manage.py migrate --noinput && python manage.py collectstatic --noinput && gunicorn config.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 1 --threads 4 --timeout 120"]

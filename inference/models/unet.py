@@ -29,7 +29,7 @@ if nn is not None:
         """
         U-Net network predicting binary discoloration masks:
         0: Healthy Canopy / Background
-        1: Discolored Lesion (Bacterial Leaf Blight / Dead Heart / White Head)
+        1: Discolored Lesion (Bacterial Leaf Blight / White Head)
         """
         def __init__(self, in_channels=3, out_channels=1):
             super().__init__()
@@ -50,7 +50,7 @@ if nn is not None:
             self.outc = nn.Conv2d(32, out_channels, kernel_size=1)
             self.sigmoid = nn.Sigmoid()
 
-        def forward(self, x):
+        def forward_logits(self, x):
             x1 = self.inc(x)
             x2 = self.down1(x1)
             x3 = self.down2(x2)
@@ -65,8 +65,10 @@ if nn is not None:
             x = self.up3(x)
             x = self.conv3(torch.cat([x, x1], dim=1))
 
-            logits = self.outc(x)
-            return self.sigmoid(logits)
+            return self.outc(x)
+
+        def forward(self, x):
+            return self.sigmoid(self.forward_logits(x))
 else:
     class RiceCanopyUNet:
         pass

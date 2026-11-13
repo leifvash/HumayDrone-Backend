@@ -49,6 +49,7 @@ class DroneFlight(models.Model):
     """
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='flights', null=True, blank=True)
     title = models.CharField(max_length=200, default="Survey Mission")
+    survey_mission_id = models.UUIDField(null=True, blank=True, db_index=True, help_text="Optional linked Supabase survey_missions UUID")
     start_time = models.DateTimeField(default=timezone.now)
     end_time = models.DateTimeField(null=True, blank=True)
     flight_path = models.JSONField(default=list, blank=True, help_text="List of waypoints and target coordinates")
@@ -68,7 +69,7 @@ class ImageCapture(models.Model):
     timestamp = models.DateTimeField(default=timezone.now)
     latitude = models.FloatField()
     longitude = models.FloatField()
-    altitude = models.FloatField(default=3.0, help_text="Altitude in meters")
+    altitude = models.FloatField(null=True, blank=True, default=None, help_text="Height above takeoff point (AGL) in meters")
     file = models.ImageField(upload_to='captures/%Y/%m/%d/')
     encrypted = models.BooleanField(default=False)
     retention_period = models.IntegerField(default=365, help_text="Retention period in days")
@@ -106,6 +107,12 @@ class CloudInferenceResult(models.Model):
         ('COMPLETED', 'Completed'),
         ('FAILED', 'Failed'),
     ]
+    REVIEW_STATUS_CHOICES = [
+        ('PENDING', 'Pending'),
+        ('VERIFIED', 'Verified Disease'),
+        ('NEEDS_INSPECTION', 'Needs Field Inspection'),
+        ('REJECTED', 'Rejected'),
+    ]
 
     image = models.OneToOneField(ImageCapture, on_delete=models.CASCADE, related_name='cloud_result')
     model_used = models.CharField(max_length=150, default="YOLOv8 + U-Net + ResNet-50")
@@ -117,6 +124,11 @@ class CloudInferenceResult(models.Model):
     treatment_recommendation = models.TextField(blank=True, help_text="Chemical or cultural control advisory")
     error_message = models.TextField(blank=True)
     processed_at = models.DateTimeField(null=True, blank=True)
+    review_status = models.CharField(max_length=24, choices=REVIEW_STATUS_CHOICES, default='PENDING')
+    review_notes = models.TextField(blank=True, default='', help_text="Technician diagnostic notes for field validation and reporting")
+    reviewed_label = models.CharField(max_length=100, blank=True, default='', help_text="Optional technician-corrected diagnosis (Healthy, Bacterial Leaf Blight, White Head)")
+    reviewed_by = models.CharField(max_length=255, blank=True, default='')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return f"Cloud [{self.classification_label} - Severity: {self.severity_score:.1f}%]"
@@ -130,7 +142,7 @@ class AnalyticsReport(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='reports', null=True, blank=True)
     flight = models.OneToOneField(DroneFlight, on_delete=models.CASCADE, related_name='report')
     created_at = models.DateTimeField(auto_now_add=True)
-    summary_statistics = models.JSONField(default=dict, help_text="Counts of BLB, Whitehead, Deadheart, overall damage %")
+    summary_statistics = models.JSONField(default=dict, help_text="Counts of BLB, White Head, Healthy, review statuses, overall damage %")
     severity_map = models.JSONField(default=dict, help_text="GeoJSON heat-zones and discolored coordinates")
     recommendations = models.TextField(blank=True, help_text="Actionable farm advice")
 
