@@ -364,4 +364,44 @@ class HumayDroneBackendTestCase(TestCase):
                 import os
                 self.assertTrue(os.path.exists(tmp_local))
 
+    @override_settings(CELERY_TASK_ALWAYS_EAGER=True)
+    def test_upload_binds_farm_id_and_filters_by_farm(self):
+        farm_a = "11111111-1111-4111-8111-111111111111"
+        farm_b = "22222222-2222-4222-8222-222222222222"
+        mission_uuid = "33333333-3333-4333-8333-333333333333"
+        img_a = io.BytesIO()
+        Image.new('RGB', (160, 160), color=(34, 139, 34)).save(img_a, 'jpeg')
+        img_a.name = 'farm_a.jpg'
+        img_a.seek(0)
+
+        resp = self.client.post('/api/images/upload/', {
+            'flight_id': 9101,
+            'farm_id': farm_a,
+            'farm_name': 'TAB-01 North Plot',
+            'survey_mission_id': mission_uuid,
+            'latitude': 8.4543,
+            'longitude': 124.6321,
+            'file': img_a,
+        }, format='multipart')
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+
+        flights_a = self.client.get(f'/api/flights/?farm_id={farm_a}').json()
+        self.assertEqual(len(flights_a), 1)
+        self.assertEqual(flights_a[0]['farm_id'], farm_a)
+        self.assertEqual(flights_a[0]['farm_name'], 'TAB-01 North Plot')
+        self.assertEqual(flights_a[0]['survey_mission_id'], mission_uuid)
+
+        flights_b = self.client.get(f'/api/flights/?farm_id={farm_b}').json()
+        self.assertEqual(len(flights_b), 0)
+
+        imgs_a = self.client.get(f'/api/images/?farm_id={farm_a}').json()
+        self.assertEqual(len(imgs_a), 1)
+        self.assertEqual(imgs_a[0]['farm_id'], farm_a)
+        self.assertEqual(imgs_a[0]['survey_mission_id'], mission_uuid)
+
+        report_a = self.client.get('/api/flights/9101/report/').json()
+        self.assertEqual(report_a['farm_id'], farm_a)
+        self.assertEqual(report_a['farm_name'], 'TAB-01 North Plot')
+
+
 

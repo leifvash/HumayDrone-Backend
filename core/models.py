@@ -50,6 +50,8 @@ class DroneFlight(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='flights', null=True, blank=True)
     title = models.CharField(max_length=200, default="Survey Mission")
     survey_mission_id = models.UUIDField(null=True, blank=True, db_index=True, help_text="Optional linked Supabase survey_missions UUID")
+    farm_id = models.UUIDField(null=True, blank=True, db_index=True, help_text="Optional linked Supabase public.farms UUID")
+    farm_name = models.CharField(max_length=255, blank=True, default="", help_text="Optional cached farm code/name for display")
     start_time = models.DateTimeField(default=timezone.now)
     end_time = models.DateTimeField(null=True, blank=True)
     flight_path = models.JSONField(default=list, blank=True, help_text="List of waypoints and target coordinates")

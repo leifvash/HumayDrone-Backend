@@ -43,12 +43,18 @@ class CloudInferenceResultSerializer(serializers.ModelSerializer):
 
 class ImageCaptureSerializer(serializers.ModelSerializer):
     flight_title = serializers.CharField(source='flight.title', read_only=True)
+    survey_mission_id = serializers.UUIDField(source='flight.survey_mission_id', read_only=True)
+    farm_id = serializers.UUIDField(source='flight.farm_id', read_only=True)
+    farm_name = serializers.CharField(source='flight.farm_name', read_only=True)
     edge_result = EdgeInferenceResultSerializer(read_only=True)
     cloud_result = CloudInferenceResultSerializer(read_only=True)
 
     class Meta:
         model = ImageCapture
-        fields = ['id', 'flight', 'flight_title', 'timestamp', 'latitude', 'longitude', 'altitude', 'file', 'edge_result', 'cloud_result']
+        fields = [
+            'id', 'flight', 'flight_title', 'survey_mission_id', 'farm_id', 'farm_name',
+            'timestamp', 'latitude', 'longitude', 'altitude', 'file', 'edge_result', 'cloud_result',
+        ]
 
 class DroneFlightSerializer(serializers.ModelSerializer):
     images_count = serializers.IntegerField(source='images.count', read_only=True)
@@ -56,7 +62,7 @@ class DroneFlightSerializer(serializers.ModelSerializer):
     class Meta:
         model = DroneFlight
         fields = [
-            'id', 'title', 'survey_mission_id', 'start_time', 'end_time',
+            'id', 'title', 'survey_mission_id', 'farm_id', 'farm_name', 'start_time', 'end_time',
             'flight_path', 'telemetry_log', 'is_completed', 'images_count',
         ]
 
@@ -64,6 +70,8 @@ class AnalyticsReportSerializer(serializers.ModelSerializer):
     flight_id = serializers.IntegerField(source='flight.id', read_only=True)
     flight_title = serializers.CharField(source='flight.title', read_only=True)
     survey_mission_id = serializers.UUIDField(source='flight.survey_mission_id', read_only=True)
+    farm_id = serializers.UUIDField(source='flight.farm_id', read_only=True)
+    farm_name = serializers.CharField(source='flight.farm_name', read_only=True)
 
     class Meta:
         model = AnalyticsReport
@@ -72,6 +80,8 @@ class AnalyticsReportSerializer(serializers.ModelSerializer):
             'flight_id',
             'flight_title',
             'survey_mission_id',
+            'farm_id',
+            'farm_name',
             'created_at',
             'summary_statistics',
             'severity_map',

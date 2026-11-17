@@ -132,6 +132,16 @@ class DroneFlightViewSet(viewsets.ModelViewSet):
     queryset = DroneFlight.objects.all().order_by('-start_time')
     serializer_class = DroneFlightSerializer
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        farm_uuid = _parse_optional_uuid(self.request.query_params.get('farm_id'))
+        if farm_uuid is not None:
+            queryset = queryset.filter(farm_id=farm_uuid)
+        survey_uuid = _parse_optional_uuid(self.request.query_params.get('survey_mission_id'))
+        if survey_uuid is not None:
+            queryset = queryset.filter(survey_mission_id=survey_uuid)
+        return queryset
+
 
 _VALID_DIAGNOSTIC_LABELS = {
     "healthy": "Healthy",
@@ -248,6 +258,12 @@ class ImageUploadAndInferView(APIView):
             return Response({"error": "flight_id is required"}, status=status.HTTP_400_BAD_REQUEST)
 
         survey_mission_uuid = _parse_optional_uuid(request.data.get('survey_mission_id'))
+        farm_uuid = _parse_optional_uuid(request.data.get('farm_id'))
+        farm_name = str(request.data.get('farm_name') or '').strip()[:255]
+        flight_title = str(request.data.get('flight_title') or '').strip()[:200]
+        default_title = flight_title or (
+            f"[{farm_name}] Mission #{flight_id}" if farm_name else f"Field Mission #{flight_id}"
+        )
 
         # Support offline-generated flight IDs by automatically finding or registering the flight session
         flight = DroneFlight.objects.filter(id=flight_id).first()
@@ -255,17 +271,31 @@ class ImageUploadAndInferView(APIView):
             try:
                 flight = DroneFlight.objects.create(
                     id=int(flight_id),
-                    title=f"Field Mission #{flight_id}",
+                    title=default_title,
                     survey_mission_id=survey_mission_uuid,
+                    farm_id=farm_uuid,
+                    farm_name=farm_name,
                 )
             except Exception:
                 flight = DroneFlight.objects.create(
-                    title=f"Field Mission #{flight_id}",
+                    title=default_title,
                     survey_mission_id=survey_mission_uuid,
+                    farm_id=farm_uuid,
+                    farm_name=farm_name,
                 )
-        elif survey_mission_uuid and not flight.survey_mission_id:
-            flight.survey_mission_id = survey_mission_uuid
-            flight.save(update_fields=['survey_mission_id'])
+        else:
+            updated_flight_fields = []
+            if survey_mission_uuid and not flight.survey_mission_id:
+                flight.survey_mission_id = survey_mission_uuid
+                updated_flight_fields.append('survey_mission_id')
+            if farm_uuid and not flight.farm_id:
+                flight.farm_id = farm_uuid
+                updated_flight_fields.append('farm_id')
+            if farm_name and not flight.farm_name:
+                flight.farm_name = farm_name
+                updated_flight_fields.append('farm_name')
+            if updated_flight_fields:
+                flight.save(update_fields=updated_flight_fields)
 
         file = request.FILES.get('file')
         if not file:
@@ -364,6 +394,9 @@ class ImageListView(APIView):
         flight_id = request.query_params.get('flight_id')
         if flight_id:
             queryset = queryset.filter(flight_id=flight_id)
+        farm_uuid = _parse_optional_uuid(request.query_params.get('farm_id'))
+        if farm_uuid is not None:
+            queryset = queryset.filter(flight__farm_id=farm_uuid)
         serializer = ImageCaptureSerializer(queryset, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
