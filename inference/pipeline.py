@@ -116,8 +116,12 @@ class CloudInferencePipeline:
         G_f = img_bgr[:, :, 1].astype(np.float32)
         R_f = img_bgr[:, :, 2].astype(np.float32)
 
-        # Exclude dark shadow / wet soil / mud background between rice hills
-        soil_mask = (V < 60) | ((V < 105) & (S < 50) & (G_f < R_f * 1.15) & (R_f < 115))
+        # Exclude dark shadow / wet soil / mud background AND sunlit dry clay soil between rice hills
+        soil_mask = (
+            (V < 60)
+            | ((V < 105) & (S < 50) & (G_f < R_f * 1.15) & (R_f < 115))
+            | ((V < 225) & (S <= 28) & (G_f < R_f * 1.15))
+        )
         # Exclude pure specular sunlight glare on leaves/water
         glare_mask = (V >= 252) & (S <= 8) & (B_f >= 245) & (G_f >= 245) & (R_f >= 245)
         excluded_bg = soil_mask | glare_mask
@@ -737,6 +741,18 @@ class CloudInferencePipeline:
         # ------------------------------------------------------------------
         white_ratio = total_white / (total_discolored + 1e-5)
         white_min_pixels = min(2500, max(100, int(total_canopy * 0.03)))
+        unet_mean_act = float(np.mean(unet_prob_map))
+
+        # Distinguish pure bright bleached white from dull gray-tan reflections
+        bright_white_px = int(np.sum(refined_white_mask & (V >= 220) & (S <= 35)))
+        bright_white_dom = (
+            total_white > 0 and (bright_white_px / float(total_white)) >= 0.65
+        )
+        strong_hsv_white = (
+            total_white > white_min_pixels
+            and white_ratio >= 0.35
+            and (float(resnet_probs[2]) >= 0.22 or bright_white_dom)
+        )
 
         # Top disease candidate among ResNet-50's 2 disease classes [BLB, White Head]
         resnet_disease_probs = resnet_probs[1:3]
@@ -744,12 +760,35 @@ class CloudInferencePipeline:
         resnet_best_disease_label = self.DISEASE_CLASSES[1 + best_disease_subidx]
         resnet_best_disease_prob = float(resnet_disease_probs[best_disease_subidx])
 
-        if severity_score < 0.85 and not (has_disease_hint and box_pixels > 0):
+        healthy_override = (
+            yolo_disease_label is None
+            and edge_label is None
+            and resnet_label == "Healthy"
+            and (
+                (
+                    float(resnet_probs[0]) >= 0.75
+                    and unet_mean_act < 0.05
+                    and severity_score < 12.0
+                )
+                or (
+                    not strong_hsv_white
+                    and resnet_best_disease_prob < 0.15
+                    and unet_mean_act < 0.05
+                )
+            )
+        )
+
+        if (severity_score < 0.85 and not (has_disease_hint and box_pixels > 0)) or healthy_override:
             classification = "Healthy"
             severity_score = 0.0
-            confidence = max(0.92, float(resnet_probs[0]), yolo_top_conf if yolo_top_label == "Healthy" else 0.0)
+            confidence = max(0.88, float(resnet_probs[0]), yolo_top_conf if yolo_top_label == "Healthy" else 0.0)
         else:
-            if total_white > white_min_pixels and white_ratio >= 0.35:
+            if (
+                yolo_disease_label == "White Head"
+                or edge_label == "White Head"
+                or resnet_label == "White Head"
+                or strong_hsv_white
+            ):
                 classification = "White Head"
             elif yolo_disease_label in self.ACTIVE_DISEASE_CLASSES:
                 classification = yolo_disease_label
@@ -757,7 +796,7 @@ class CloudInferencePipeline:
                 classification = edge_label
             elif resnet_label in self.ACTIVE_DISEASE_CLASSES:
                 classification = resnet_label
-            elif total_white > white_min_pixels and white_ratio >= 0.18:
+            elif total_white > white_min_pixels and white_ratio >= 0.25 and float(resnet_probs[2]) >= 0.22:
                 classification = "White Head"
             elif resnet_best_disease_prob >= 0.15:
                 classification = resnet_best_disease_label

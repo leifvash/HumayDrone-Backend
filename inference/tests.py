@@ -301,3 +301,65 @@ class CloudNeuralInferenceTests(TestCase):
             self.assertEqual(retry_resp.status_code, 200)
             self.assertEqual(retry_resp.json()["image"]["cloud_result"]["status"], "COMPLETED")
 
+    def test_soil_mask_and_healthy_fusion_guards(self):
+        from unittest.mock import patch
+
+        # 1. Sunlit dull pale clay soil (V < 225, S <= 28) is excluded as soil, not whitehead/lesion
+        # while pure bright white panicle [230, 235, 235] stays in white_mask
+        patch_bgr = np.full((120, 120, 3), [34, 139, 34], dtype=np.uint8)
+        patch_bgr[10:50, 10:50] = [175, 180, 185]  # dry gray-tan mud (V=185, S=14)
+        patch_bgr[60:100, 60:100] = [230, 235, 235]  # bright white lesion
+        masks = CloudInferencePipeline._compute_hsv_masks(patch_bgr)
+        self.assertTrue(bool(np.all(masks["soil_mask"][15:45, 15:45])))
+        self.assertFalse(bool(np.any(masks["white_mask"][15:45, 15:45])))
+        self.assertFalse(bool(np.any(masks["yellow_brown_mask"][15:45, 15:45])))
+        self.assertTrue(bool(np.all(masks["white_mask"][65:95, 65:95])))
+
+        # 2. Minor dry specks (1%..10% HSV) + strong ResNet Healthy must NOT fall back to BLB
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            speck_path = tmp.name
+        try:
+            speck_bgr = np.full((200, 200, 3), [34, 139, 34], dtype=np.uint8)
+            speck_bgr[80:115, 80:115] = [35, 165, 215]  # ~3% minor yellow-brown speck
+            cv2.imwrite(speck_path, speck_bgr)
+
+            with patch.object(
+                self.pipeline,
+                "_run_resnet_with_rois",
+                return_value=(np.array([0.92, 0.04, 0.04], dtype=np.float32), "Healthy", 0.92),
+            ), patch.object(
+                self.pipeline,
+                "unet_model",
+                None,
+            ), patch.object(
+                self.pipeline,
+                "yolo_tflite_detector",
+                None,
+            ):
+                res_healthy = self.pipeline._run_real_models(speck_path)
+            self.assertEqual(res_healthy["classification_label"], "Healthy")
+            self.assertEqual(res_healthy["severity_score"], 0.0)
+        finally:
+            if os.path.exists(speck_path):
+                os.remove(speck_path)
+
+        # 3. Dull pale reflections must NOT override ResNet BLB into false White Head
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            blb_pale_path = tmp.name
+        try:
+            blb_pale = np.full((200, 200, 3), [34, 139, 34], dtype=np.uint8)
+            blb_pale[20:140, 20:140] = [148, 178, 178]  # dull pale straw/mud (S=43, V=178)
+            cv2.imwrite(blb_pale_path, blb_pale)
+
+            with patch.object(
+                self.pipeline,
+                "_run_resnet_with_rois",
+                return_value=(np.array([0.30, 0.62, 0.08], dtype=np.float32), "Bacterial Leaf Blight", 0.62),
+            ):
+                res_blb = self.pipeline._run_real_models(blb_pale_path)
+            self.assertEqual(res_blb["classification_label"], "Bacterial Leaf Blight")
+        finally:
+            if os.path.exists(blb_pale_path):
+                os.remove(blb_pale_path)
+
+
