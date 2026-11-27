@@ -362,4 +362,89 @@ class CloudNeuralInferenceTests(TestCase):
             if os.path.exists(blb_pale_path):
                 os.remove(blb_pale_path)
 
+    def test_cloud_overrides_false_positive_edge_label_and_calibrates_confidence(self):
+        import io
+        import json
+        from unittest.mock import patch
+        from PIL import Image
+        from django.test import override_settings
+        from rest_framework.test import APIClient
+        from core.models import DroneFlight, CloudInferenceResult, EdgeInferenceResult
+
+        # 1. High-res aerial frame where Edge guessed "White Head" (no boxes)
+        #    but ResNet-50 sees Healthy (0.82) & U-Net activation is low -> Cloud corrects to Healthy.
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            aerial_path = tmp.name
+        try:
+            aerial = np.full((800, 1000, 3), [34, 139, 34], dtype=np.uint8)
+            aerial[100:260, 100:260] = [180, 195, 200]
+            cv2.imwrite(aerial_path, aerial)
+
+            with patch.object(
+                self.pipeline,
+                "_run_resnet_with_rois",
+                return_value=(np.array([0.82, 0.13, 0.05], dtype=np.float32), "Healthy", 0.82),
+            ):
+                res_override = self.pipeline._run_real_models(
+                    aerial_path,
+                    edge_detections=[{"label": "White Head", "confidence": 0.83}],
+                )
+            self.assertEqual(res_override["classification_label"], "Healthy")
+            self.assertEqual(res_override["severity_score"], 0.0)
+            self.assertAlmostEqual(res_override["confidence_score"], 0.82, places=2)
+
+            # 2. When lesion pixels exist and ResNet-50 predicts BLB (0.52) against an edge White Head
+            #    hint (no boxes), Cloud chooses BLB with calibrated ~0.52 confidence (not >= 0.78 floor).
+            blb_aerial = np.full((800, 1000, 3), [34, 139, 34], dtype=np.uint8)
+            blb_aerial[120:420, 180:520] = [35, 165, 215]  # ~12.8% necrotic yellow-brown lesion
+            cv2.imwrite(aerial_path, blb_aerial)
+            with patch.object(
+                self.pipeline,
+                "_run_resnet_with_rois",
+                return_value=(np.array([0.42, 0.52, 0.06], dtype=np.float32), "Bacterial Leaf Blight", 0.52),
+            ), patch.object(
+                self.pipeline,
+                "yolo_tflite_detector",
+                None,
+            ):
+                res_blb = self.pipeline._run_real_models(
+                    aerial_path,
+                    edge_detections=[{"label": "White Head", "confidence": 0.83}],
+                )
+            self.assertEqual(res_blb["classification_label"], "Bacterial Leaf Blight")
+            self.assertGreater(res_blb["severity_score"], 0.0)
+            self.assertAlmostEqual(res_blb["confidence_score"], 0.52, places=2)
+        finally:
+            if os.path.exists(aerial_path):
+                os.remove(aerial_path)
+
+        # 3. Verify EdgeInferenceResult keeps original Edge label even if Cloud overrides to Healthy
+        client = APIClient()
+        flight = DroneFlight.objects.create(title="Edge Preservation Flight")
+        buf = io.BytesIO()
+        Image.new("RGB", (640, 480), color=(34, 139, 34)).save(buf, "JPEG")
+        buf.name = "healthy_field.jpg"
+        buf.seek(0)
+
+        with override_settings(CELERY_TASK_ALWAYS_EAGER=True):
+            resp = client.post(
+                "/api/images/upload/",
+                {
+                    "flight_id": flight.id,
+                    "file": buf,
+                    "edge_detections": json.dumps(
+                        {"label": "White Head", "confidence": 0.83, "boxes": []}
+                    ),
+                },
+                format="multipart",
+            )
+        self.assertEqual(resp.status_code, 202)
+        img_id = resp.json()["image_id"]
+        edge_rec = EdgeInferenceResult.objects.get(image_id=img_id)
+        cloud_rec = CloudInferenceResult.objects.get(image_id=img_id)
+        self.assertEqual(edge_rec.classification_label, "White Head")
+        self.assertAlmostEqual(edge_rec.confidence_score, 0.83, places=2)
+        self.assertEqual(cloud_rec.classification_label, "Healthy")
+
+
 

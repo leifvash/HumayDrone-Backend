@@ -666,6 +666,7 @@ class CloudInferencePipeline:
                 )
 
             hsv_masks = self._compute_hsv_masks(img)
+            H = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[:, :, 0]
             V = hsv_masks["V"]
             S = hsv_masks["S"]
             soil_mask = hsv_masks["soil_mask"]
@@ -682,8 +683,29 @@ class CloudInferencePipeline:
                 & (~soil_mask)
                 & (~glare_mask)
             )
-            refined_white_mask = white_mask | (unet_lesion_mask & (V >= 145) & (S <= 85))
-            refined_yb_mask = yellow_brown_mask | (unet_lesion_mask & (S >= 25) & (~refined_white_mask))
+            if (height * width) >= 500_000 and self.unet_model is not None:
+                unet_support = unet_prob_map >= 0.25
+                strong_bright_white = white_mask & (V >= 220) & (S <= 35)
+                strong_necrotic_yb = (
+                    yellow_brown_mask
+                    & (H >= 8)
+                    & (H <= 30)
+                    & (S >= 65)
+                    & (V >= 50)
+                )
+                refined_white_mask = (
+                    (white_mask & unet_support)
+                    | strong_bright_white
+                    | (unet_lesion_mask & (V >= 145) & (S <= 85))
+                )
+                refined_yb_mask = (
+                    (yellow_brown_mask & unet_support)
+                    | (strong_necrotic_yb & (unet_prob_map >= 0.12))
+                    | (unet_lesion_mask & (S >= 25))
+                ) & (~refined_white_mask)
+            else:
+                refined_white_mask = white_mask | (unet_lesion_mask & (V >= 145) & (S <= 85))
+                refined_yb_mask = yellow_brown_mask | (unet_lesion_mask & (S >= 25) & (~refined_white_mask))
             refined_green_mask = green_mask & (~refined_yb_mask) & (~refined_white_mask)
 
             total_green = int(np.sum(refined_green_mask))
@@ -760,12 +782,19 @@ class CloudInferencePipeline:
         resnet_best_disease_label = self.DISEASE_CLASSES[1 + best_disease_subidx]
         resnet_best_disease_prob = float(resnet_disease_probs[best_disease_subidx])
 
+        has_explicit_edge_boxes = bool(edge_boxes) and box_pixels > 0
+
         healthy_override = (
             yolo_disease_label is None
-            and edge_label is None
+            and not has_explicit_edge_boxes
             and resnet_label == "Healthy"
             and (
                 (
+                    float(resnet_probs[0]) >= 0.60
+                    and unet_mean_act < 0.05
+                    and not strong_hsv_white
+                )
+                or (
                     float(resnet_probs[0]) >= 0.75
                     and unet_mean_act < 0.05
                     and severity_score < 12.0
@@ -781,39 +810,56 @@ class CloudInferencePipeline:
         if (severity_score < 0.85 and not (has_disease_hint and box_pixels > 0)) or healthy_override:
             classification = "Healthy"
             severity_score = 0.0
-            confidence = max(0.88, float(resnet_probs[0]), yolo_top_conf if yolo_top_label == "Healthy" else 0.0)
+            confidence = min(
+                0.99,
+                max(
+                    float(resnet_probs[0]),
+                    yolo_top_conf if yolo_top_label == "Healthy" else 0.0,
+                    0.50 if self.resnet_model is None else 0.0,
+                ),
+            )
         else:
             if (
                 yolo_disease_label == "White Head"
-                or edge_label == "White Head"
-                or resnet_label == "White Head"
+                or (resnet_label == "White Head" and resnet_conf >= 0.40)
                 or strong_hsv_white
             ):
                 classification = "White Head"
             elif yolo_disease_label in self.ACTIVE_DISEASE_CLASSES:
                 classification = yolo_disease_label
-            elif edge_label in self.ACTIVE_DISEASE_CLASSES:
-                classification = edge_label
-            elif resnet_label in self.ACTIVE_DISEASE_CLASSES:
+            elif resnet_label in self.ACTIVE_DISEASE_CLASSES and resnet_conf >= 0.40:
                 classification = resnet_label
+            elif has_explicit_edge_boxes and edge_label in self.ACTIVE_DISEASE_CLASSES:
+                classification = edge_label
             elif total_white > white_min_pixels and white_ratio >= 0.25 and float(resnet_probs[2]) >= 0.22:
                 classification = "White Head"
-            elif resnet_best_disease_prob >= 0.15:
+            elif resnet_best_disease_prob >= 0.20:
                 classification = resnet_best_disease_label
+            elif edge_label in self.ACTIVE_DISEASE_CLASSES:
+                classification = edge_label
             else:
                 classification = "Bacterial Leaf Blight"
 
             cls_idx = self.DISEASE_CLASSES.index(classification)
             resnet_cls_prob = float(resnet_probs[cls_idx])
-            confidence = min(
-                0.99,
-                max(
-                    edge_conf if edge_label == classification else 0.0,
-                    yolo_disease_conf if yolo_disease_label == classification else 0.0,
+            if self.resnet_model is not None:
+                neural_conf = max(
                     resnet_cls_prob,
-                    0.78 + (severity_score / 100.0) * 0.21,
-                ),
-            )
+                    yolo_disease_conf if yolo_disease_label == classification else 0.0,
+                )
+                if has_explicit_edge_boxes and edge_label == classification:
+                    confidence = min(0.99, max(neural_conf, edge_conf))
+                else:
+                    confidence = min(0.99, max(neural_conf, 0.35 if strong_hsv_white else 0.0))
+            else:
+                confidence = min(
+                    0.99,
+                    max(
+                        edge_conf if edge_label == classification else 0.0,
+                        yolo_disease_conf if yolo_disease_label == classification else 0.0,
+                        0.78 + (severity_score / 100.0) * 0.21,
+                    ),
+                )
 
         # Populate or supplement lesion bounding boxes from the refined segmentation mask
         if classification != "Healthy":

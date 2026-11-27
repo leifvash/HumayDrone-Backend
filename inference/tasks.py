@@ -91,14 +91,22 @@ def process_cloud_inference_task(self, image_id: int, edge_data: list = None):
             )
         elif (
             existing_edge.model_used == 'yolov8n_rice.tflite'
-            or not existing_edge.bounding_boxes
-            or existing_edge.classification_label == 'Dead Heart'
             or edge_data is None
         ):
             existing_edge.bounding_boxes = boxes
             existing_edge.classification_label = top_label or 'Healthy'
             existing_edge.confidence_score = top_conf
             existing_edge.save(update_fields=['bounding_boxes', 'classification_label', 'confidence_score'])
+        else:
+            updated_edge_fields = []
+            if not existing_edge.bounding_boxes and boxes:
+                existing_edge.bounding_boxes = boxes
+                updated_edge_fields.append('bounding_boxes')
+            if existing_edge.classification_label == 'Dead Heart':
+                existing_edge.classification_label = top_label or 'Healthy'
+                updated_edge_fields.append('classification_label')
+            if updated_edge_fields:
+                existing_edge.save(update_fields=updated_edge_fields)
 
         logger.info(f"Cloud inference completed for Image #{image_id}: {cloud_result.classification_label} ({cloud_result.severity_score}%)")
         return {
