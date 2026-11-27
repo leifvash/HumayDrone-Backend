@@ -403,5 +403,128 @@ class HumayDroneBackendTestCase(TestCase):
         self.assertEqual(report_a['farm_id'], farm_a)
         self.assertEqual(report_a['farm_name'], 'TAB-01 North Plot')
 
+    def test_archive_restore_and_30_day_auto_purge_requires_admin(self):
+        from datetime import timedelta
+        from unittest.mock import patch
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from django.utils import timezone
+        from core.auth import AuthenticatedSupabaseUser
+        from core.archive import purge_expired_archived_records
+        from core.models import EdgeInferenceResult, AnalyticsReport
+
+        mission_uuid = "44444444-4444-4444-8444-444444444444"
+        flight = DroneFlight.objects.create(
+            title="Archivable Mission",
+            survey_mission_id=mission_uuid,
+        )
+        survey = SurveyMission.objects.create(
+            id=mission_uuid,
+            title="Archivable Survey",
+            total_scanned_count=12,
+        )
+        img = ImageCapture.objects.create(
+            flight=flight,
+            latitude=8.45,
+            longitude=124.63,
+            file=SimpleUploadedFile(
+                "test_canopy.jpg",
+                self._generate_test_image().read(),
+                content_type="image/jpeg",
+            ),
+        )
+        EdgeInferenceResult.objects.create(
+            image=img,
+            classification_label="Bacterial Leaf Blight",
+            confidence_score=0.91,
+            bounding_boxes=[[1, 2, 3, 4]],
+        )
+        CloudInferenceResult.objects.create(
+            image=img,
+            status="COMPLETED",
+            classification_label="Bacterial Leaf Blight",
+            confidence_score=0.95,
+            severity_score=14.2,
+        )
+        AnalyticsReport.objects.create(flight=flight, summary_statistics={}, severity_map={})
+
+        # 1. Unauthenticated caller rejected with 401
+        resp_anon = self.client.post(f"/api/flights/{flight.id}/archive/")
+        self.assertEqual(resp_anon.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # 2. Non-admin technician caller rejected with 403
+        tech_user = AuthenticatedSupabaseUser(user_id="tech-1", email="tech@humaydrone.test", role="authenticated")
+        with patch("core.auth.verify_supabase_bearer_token", return_value=(tech_user, None)), \
+             patch("core.auth._is_supabase_active_admin", return_value=False):
+            resp_tech = self.client.post(f"/api/flights/{flight.id}/archive/")
+            self.assertEqual(resp_tech.status_code, status.HTTP_403_FORBIDDEN)
+
+        # 3. Admin archives flight -> cascades to SurveyMission, hides from active lists, shows in ?archived=true
+        admin_user = AuthenticatedSupabaseUser(user_id="admin-1", email="admin@humaydrone.test", role="authenticated")
+        with patch("core.auth.verify_supabase_bearer_token", return_value=(admin_user, None)), \
+             patch("core.auth._is_supabase_active_admin", return_value=True):
+            resp_arch = self.client.post(f"/api/flights/{flight.id}/archive/")
+            self.assertEqual(resp_arch.status_code, status.HTTP_200_OK)
+            arch_data = resp_arch.json()
+            self.assertIsNotNone(arch_data["archived_at"])
+            self.assertEqual(arch_data["days_remaining"], 30)
+
+        survey.refresh_from_db()
+        self.assertIsNotNone(survey.archived_at)
+
+        active_ids = [f["id"] for f in self.client.get("/api/flights/").json()]
+        self.assertNotIn(flight.id, active_ids)
+        self.assertEqual(len(self.client.get(f"/api/images/?flight_id={flight.id}").json()), 0)
+
+        archived_list = self.client.get("/api/flights/?archived=true").json()
+        self.assertEqual(len(archived_list), 1)
+        self.assertEqual(archived_list[0]["id"], flight.id)
+
+        # 4. Admin restores flight -> returns to active list
+        with patch("core.auth.verify_supabase_bearer_token", return_value=(admin_user, None)), \
+             patch("core.auth._is_supabase_active_admin", return_value=True):
+            resp_rest = self.client.post(f"/api/flights/{flight.id}/restore/")
+            self.assertEqual(resp_rest.status_code, status.HTTP_200_OK)
+            self.assertIsNone(resp_rest.json()["archived_at"])
+
+        survey.refresh_from_db()
+        self.assertIsNone(survey.archived_at)
+        self.assertIn(flight.id, [f["id"] for f in self.client.get("/api/flights/").json()])
+
+        # 5. Archive via sync-mission-archive, backdate 31 days -> auto-purged permanently
+        with patch("core.auth.verify_supabase_bearer_token", return_value=(admin_user, None)), \
+             patch("core.auth._is_supabase_active_admin", return_value=True):
+            resp_sync = self.client.post(
+                "/api/flights/sync-mission-archive/",
+                {"survey_mission_id": mission_uuid, "action": "archive"},
+                format="json",
+            )
+            self.assertEqual(resp_sync.status_code, status.HTTP_200_OK)
+            self.assertEqual(resp_sync.json()["flights_updated"], 1)
+
+        expired_ts = timezone.now() - timedelta(days=31)
+        DroneFlight.objects.filter(id=flight.id).update(archived_at=expired_ts)
+        SurveyMission.objects.filter(id=mission_uuid).update(archived_at=expired_ts)
+
+        # Attempting restore of an expired flight triggers purge & returns 410 Gone
+        with patch("core.auth.verify_supabase_bearer_token", return_value=(admin_user, None)), \
+             patch("core.auth._is_supabase_active_admin", return_value=True):
+            resp_expired = self.client.post(f"/api/flights/{flight.id}/restore/")
+            self.assertEqual(resp_expired.status_code, status.HTTP_410_GONE)
+
+        purge_expired_archived_records(force=True)
+        self.assertFalse(DroneFlight.objects.filter(id=flight.id).exists())
+        self.assertFalse(SurveyMission.objects.filter(id=mission_uuid).exists())
+        self.assertFalse(ImageCapture.objects.filter(id=img.id).exists())
+        self.assertFalse(CloudInferenceResult.objects.filter(image_id=img.id).exists())
+
+        # 6. Immediate permanent-delete endpoint removes another flight
+        flight_2 = DroneFlight.objects.create(title="Immediate Delete Test")
+        with patch("core.auth.verify_supabase_bearer_token", return_value=(admin_user, None)), \
+             patch("core.auth._is_supabase_active_admin", return_value=True):
+            resp_del = self.client.delete(f"/api/flights/{flight_2.id}/permanent-delete/")
+            self.assertEqual(resp_del.status_code, status.HTTP_200_OK)
+        self.assertFalse(DroneFlight.objects.filter(id=flight_2.id).exists())
+
+
 
 

@@ -8,7 +8,12 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
-from .auth import verify_supabase_bearer_token
+from .auth import verify_supabase_bearer_token, verify_supabase_admin_bearer_token
+from .archive import (
+    delete_flight_permanently,
+    is_archive_expired,
+    purge_expired_archived_records,
+)
 from .models import SurveyMission, DroneFlight, ImageCapture, EdgeInferenceResult, CloudInferenceResult, AnalyticsReport
 from .serializers import (
     SurveyMissionSerializer,
@@ -21,13 +26,99 @@ from .storage import local_image_path
 from inference.tasks import process_cloud_inference_task
 
 
+def _apply_archived_filter(queryset, archived_param: str, is_detail_action: bool):
+    if is_detail_action:
+        return queryset
+    mode = str(archived_param or '').strip().lower()
+    if mode in ('all', '*'):
+        return queryset
+    if mode in ('true', '1', 'only', 'archived'):
+        return queryset.filter(archived_at__isnull=False).order_by('-archived_at')
+    return queryset.filter(archived_at__isnull=True)
+
+
 class SurveyMissionViewSet(viewsets.ModelViewSet):
     """
     REST endpoint for the `survey_missions` table structure, supporting
-    list/retrieve/create and exact lat/lng disease pinpoint extraction.
+    list/retrieve/create, exact lat/lng disease pinpoint extraction,
+    and admin-only 30-day archive / restore / permanent deletion.
     """
     queryset = SurveyMission.objects.all().order_by('-captured_at')
     serializer_class = SurveyMissionSerializer
+
+    def get_queryset(self):
+        purge_expired_archived_records(force=False)
+        queryset = super().get_queryset()
+        is_detail = getattr(self, 'action', None) in ('archive', 'restore', 'permanent_delete')
+        return _apply_archived_filter(
+            queryset,
+            self.request.query_params.get('archived'),
+            is_detail,
+        )
+
+    @action(detail=True, methods=['post'])
+    def archive(self, request, pk=None):
+        admin_user, auth_err, http_status = verify_supabase_admin_bearer_token(request)
+        if admin_user is None:
+            return Response({"error": auth_err}, status=http_status)
+
+        mission = self.get_object()
+        now = timezone.now()
+        if mission.archived_at is None:
+            mission.archived_at = now
+            mission.archived_by = admin_user.display_identity
+            mission.save(update_fields=['archived_at', 'archived_by'])
+
+        DroneFlight.objects.filter(
+            survey_mission_id=mission.id,
+            archived_at__isnull=True,
+        ).update(archived_at=now, archived_by=admin_user.display_identity)
+
+        return Response(self.get_serializer(mission).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def restore(self, request, pk=None):
+        admin_user, auth_err, http_status = verify_supabase_admin_bearer_token(request)
+        if admin_user is None:
+            return Response({"error": auth_err}, status=http_status)
+
+        mission = self.get_object()
+        if is_archive_expired(mission.archived_at):
+            purge_expired_archived_records(force=True)
+            return Response(
+                {"error": "Archive retention (30 days) expired; mission was permanently deleted."},
+                status=status.HTTP_410_GONE,
+            )
+
+        mission.archived_at = None
+        mission.archived_by = ''
+        mission.save(update_fields=['archived_at', 'archived_by'])
+
+        DroneFlight.objects.filter(survey_mission_id=mission.id).update(
+            archived_at=None,
+            archived_by='',
+        )
+        return Response(self.get_serializer(mission).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['delete', 'post'], url_path='permanent-delete')
+    def permanent_delete(self, request, pk=None):
+        admin_user, auth_err, http_status = verify_supabase_admin_bearer_token(request)
+        if admin_user is None:
+            return Response({"error": auth_err}, status=http_status)
+
+        mission = self.get_object()
+        mission_id = mission.id
+        linked_flights = list(DroneFlight.objects.filter(survey_mission_id=mission_id))
+        images_deleted = 0
+        for fl in linked_flights:
+            images_deleted += delete_flight_permanently(fl)
+        mission.delete()
+        return Response({
+            "message": "Survey mission permanently deleted",
+            "mission_id": str(mission_id),
+            "flights_deleted": len(linked_flights),
+            "images_deleted": images_deleted,
+        }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['get'])
     def pinpoints(self, request, pk=None):
@@ -133,7 +224,14 @@ class DroneFlightViewSet(viewsets.ModelViewSet):
     serializer_class = DroneFlightSerializer
 
     def get_queryset(self):
+        purge_expired_archived_records(force=False)
         queryset = super().get_queryset()
+        is_detail = getattr(self, 'action', None) in ('archive', 'restore', 'permanent_delete')
+        queryset = _apply_archived_filter(
+            queryset,
+            self.request.query_params.get('archived'),
+            is_detail,
+        )
         farm_uuid = _parse_optional_uuid(self.request.query_params.get('farm_id'))
         if farm_uuid is not None:
             queryset = queryset.filter(farm_id=farm_uuid)
@@ -141,6 +239,145 @@ class DroneFlightViewSet(viewsets.ModelViewSet):
         if survey_uuid is not None:
             queryset = queryset.filter(survey_mission_id=survey_uuid)
         return queryset
+
+    @action(detail=True, methods=['post'])
+    def archive(self, request, pk=None):
+        admin_user, auth_err, http_status = verify_supabase_admin_bearer_token(request)
+        if admin_user is None:
+            return Response({"error": auth_err}, status=http_status)
+
+        flight = self.get_object()
+        now = timezone.now()
+        if flight.archived_at is None:
+            flight.archived_at = now
+            flight.archived_by = admin_user.display_identity
+            flight.save(update_fields=['archived_at', 'archived_by'])
+
+        if flight.survey_mission_id:
+            SurveyMission.objects.filter(
+                id=flight.survey_mission_id,
+                archived_at__isnull=True,
+            ).update(archived_at=now, archived_by=admin_user.display_identity)
+
+        return Response(self.get_serializer(flight).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def restore(self, request, pk=None):
+        admin_user, auth_err, http_status = verify_supabase_admin_bearer_token(request)
+        if admin_user is None:
+            return Response({"error": auth_err}, status=http_status)
+
+        flight = self.get_object()
+        if is_archive_expired(flight.archived_at):
+            purge_expired_archived_records(force=True)
+            return Response(
+                {"error": "Archive retention (30 days) expired; flight was permanently deleted."},
+                status=status.HTTP_410_GONE,
+            )
+
+        flight.archived_at = None
+        flight.archived_by = ''
+        flight.save(update_fields=['archived_at', 'archived_by'])
+
+        if flight.survey_mission_id:
+            SurveyMission.objects.filter(id=flight.survey_mission_id).update(
+                archived_at=None,
+                archived_by='',
+            )
+
+        return Response(self.get_serializer(flight).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['delete', 'post'], url_path='permanent-delete')
+    def permanent_delete(self, request, pk=None):
+        admin_user, auth_err, http_status = verify_supabase_admin_bearer_token(request)
+        if admin_user is None:
+            return Response({"error": auth_err}, status=http_status)
+
+        flight = self.get_object()
+        flight_id = flight.id
+        mission_id = flight.survey_mission_id
+        images_deleted = delete_flight_permanently(flight)
+        surveys_deleted = 0
+        if mission_id:
+            surveys_deleted, _ = SurveyMission.objects.filter(id=mission_id).delete()
+
+        return Response({
+            "message": "Drone flight permanently deleted",
+            "flight_id": flight_id,
+            "images_deleted": images_deleted,
+            "surveys_deleted": surveys_deleted,
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='sync-mission-archive')
+    def sync_mission_archive(self, request):
+        admin_user, auth_err, http_status = verify_supabase_admin_bearer_token(request)
+        if admin_user is None:
+            return Response({"error": auth_err}, status=http_status)
+
+        mission_uuid = _parse_optional_uuid(request.data.get('survey_mission_id'))
+        if mission_uuid is None:
+            return Response(
+                {"error": "Valid survey_mission_id UUID is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        action_name = str(request.data.get('action') or '').strip().lower()
+        if action_name not in ('archive', 'restore', 'permanent_delete'):
+            return Response(
+                {"error": "action must be one of: archive, restore, permanent_delete."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        matching_flights = list(DroneFlight.objects.filter(survey_mission_id=mission_uuid))
+        if action_name == 'archive':
+            now = timezone.now()
+            flights_updated = DroneFlight.objects.filter(
+                survey_mission_id=mission_uuid,
+                archived_at__isnull=True,
+            ).update(archived_at=now, archived_by=admin_user.display_identity)
+            surveys_updated = SurveyMission.objects.filter(
+                id=mission_uuid,
+                archived_at__isnull=True,
+            ).update(archived_at=now, archived_by=admin_user.display_identity)
+            return Response({
+                "action": "archive",
+                "survey_mission_id": str(mission_uuid),
+                "flights_updated": flights_updated,
+                "surveys_updated": surveys_updated,
+            }, status=status.HTTP_200_OK)
+
+        if action_name == 'restore':
+            if any(is_archive_expired(fl.archived_at) for fl in matching_flights):
+                purge_expired_archived_records(force=True)
+                return Response(
+                    {"error": "Archive retention (30 days) expired; linked flights were permanently deleted."},
+                    status=status.HTTP_410_GONE,
+                )
+            flights_updated = DroneFlight.objects.filter(
+                survey_mission_id=mission_uuid,
+            ).update(archived_at=None, archived_by='')
+            surveys_updated = SurveyMission.objects.filter(id=mission_uuid).update(
+                archived_at=None,
+                archived_by='',
+            )
+            return Response({
+                "action": "restore",
+                "survey_mission_id": str(mission_uuid),
+                "flights_updated": flights_updated,
+                "surveys_updated": surveys_updated,
+            }, status=status.HTTP_200_OK)
+
+        images_deleted = 0
+        for fl in matching_flights:
+            images_deleted += delete_flight_permanently(fl)
+        surveys_deleted, _ = SurveyMission.objects.filter(id=mission_uuid).delete()
+        return Response({
+            "action": "permanent_delete",
+            "survey_mission_id": str(mission_uuid),
+            "flights_deleted": len(matching_flights),
+            "images_deleted": images_deleted,
+            "surveys_deleted": surveys_deleted,
+        }, status=status.HTTP_200_OK)
 
 
 _VALID_DIAGNOSTIC_LABELS = {
@@ -385,12 +622,17 @@ class ImageDetailView(APIView):
 class ImageListView(APIView):
     """
     Lists uploaded drone image captures with their edge and cloud inference results.
-    Supports optional ?flight_id=<id> filtering for the Web Dashboard.
+    Supports optional ?flight_id=<id> and ?farm_id=<uuid> filtering for the Web Dashboard.
+    Excludes images belonging to archived flights unless ?include_archived=true.
     """
     def get(self, request, *args, **kwargs):
+        purge_expired_archived_records(force=False)
         queryset = ImageCapture.objects.select_related(
             'flight', 'edge_result', 'cloud_result'
         ).order_by('-timestamp')
+        include_archived = str(request.query_params.get('include_archived') or '').strip().lower() in ('true', '1', 'yes')
+        if not include_archived:
+            queryset = queryset.filter(flight__archived_at__isnull=True)
         flight_id = request.query_params.get('flight_id')
         if flight_id:
             queryset = queryset.filter(flight_id=flight_id)

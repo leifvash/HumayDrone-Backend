@@ -1,8 +1,11 @@
 from rest_framework import serializers
+from .archive import compute_archive_metadata
 from .models import SurveyMission, DroneFlight, ImageCapture, EdgeInferenceResult, CloudInferenceResult, AnalyticsReport
 
 class SurveyMissionSerializer(serializers.ModelSerializer):
     id = serializers.UUIDField(required=False)
+    purge_after = serializers.SerializerMethodField()
+    days_remaining = serializers.SerializerMethodField()
 
     class Meta:
         model = SurveyMission
@@ -23,7 +26,19 @@ class SurveyMissionSerializer(serializers.ModelSerializer):
             'disease_points',
             'boundary_points',
             'created_at',
+            'archived_at',
+            'archived_by',
+            'purge_after',
+            'days_remaining',
         ]
+
+    def get_purge_after(self, obj):
+        purge_after, _ = compute_archive_metadata(obj.archived_at)
+        return purge_after
+
+    def get_days_remaining(self, obj):
+        _, days = compute_archive_metadata(obj.archived_at)
+        return days
 
 class EdgeInferenceResultSerializer(serializers.ModelSerializer):
     class Meta:
@@ -58,13 +73,24 @@ class ImageCaptureSerializer(serializers.ModelSerializer):
 
 class DroneFlightSerializer(serializers.ModelSerializer):
     images_count = serializers.IntegerField(source='images.count', read_only=True)
+    purge_after = serializers.SerializerMethodField()
+    days_remaining = serializers.SerializerMethodField()
 
     class Meta:
         model = DroneFlight
         fields = [
             'id', 'title', 'survey_mission_id', 'farm_id', 'farm_name', 'start_time', 'end_time',
             'flight_path', 'telemetry_log', 'is_completed', 'images_count',
+            'archived_at', 'archived_by', 'purge_after', 'days_remaining',
         ]
+
+    def get_purge_after(self, obj):
+        purge_after, _ = compute_archive_metadata(obj.archived_at)
+        return purge_after
+
+    def get_days_remaining(self, obj):
+        _, days = compute_archive_metadata(obj.archived_at)
+        return days
 
 class AnalyticsReportSerializer(serializers.ModelSerializer):
     flight_id = serializers.IntegerField(source='flight.id', read_only=True)

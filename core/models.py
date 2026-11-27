@@ -33,6 +33,8 @@ class SurveyMission(models.Model):
         help_text="Array of {lat, lng} boundary polygon vertices"
     )
     created_at = models.DateTimeField(default=timezone.now)
+    archived_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    archived_by = models.CharField(max_length=255, blank=True, default='')
 
     class Meta:
         db_table = 'survey_missions'
@@ -57,6 +59,8 @@ class DroneFlight(models.Model):
     flight_path = models.JSONField(default=list, blank=True, help_text="List of waypoints and target coordinates")
     telemetry_log = models.JSONField(default=dict, blank=True, help_text="Logged speed, battery, altitude data")
     is_completed = models.BooleanField(default=False)
+    archived_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    archived_by = models.CharField(max_length=255, blank=True, default='')
 
     def __str__(self):
         return f"Flight #{self.id} - {self.title} ({self.start_time.strftime('%Y-%m-%d %H:%M')})"

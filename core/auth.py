@@ -138,3 +138,59 @@ def verify_supabase_bearer_token(
         )
 
     return None, "Invalid or expired Supabase authentication token."
+
+
+def _is_supabase_active_admin(user_id: str) -> bool:
+    """
+    Verifies against Supabase `public.profiles` that `user_id` is an active admin.
+    Uses `apikey` always and `Authorization: Bearer` only for legacy 3-segment JWT keys.
+    """
+    supabase_url = str(getattr(settings, "SUPABASE_URL", "") or "").strip().rstrip("/")
+    service_key = str(getattr(settings, "SUPABASE_SERVICE_ROLE_KEY", "") or "").strip()
+    if not supabase_url or not service_key or not user_id:
+        return False
+
+    headers = {
+        "apikey": service_key,
+        "Accept": "application/json",
+    }
+    if not service_key.startswith("sb_") and service_key.count(".") == 2 and service_key.startswith("eyJ"):
+        headers["Authorization"] = f"Bearer {service_key}"
+
+    import urllib.parse
+
+    encoded_id = urllib.parse.quote(user_id.strip(), safe="")
+    req = urllib.request.Request(
+        f"{supabase_url}/rest/v1/profiles?id=eq.{encoded_id}&select=role,status&limit=1",
+        method="GET",
+        headers=headers,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            rows = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return False
+
+    if not isinstance(rows, list) or not rows:
+        return False
+    profile = rows[0] if isinstance(rows[0], dict) else {}
+    role = str(profile.get("role") or "").strip().lower()
+    acct_status = str(profile.get("status") or "").strip().lower()
+    return role == "admin" and acct_status in ("", "active")
+
+
+def verify_supabase_admin_bearer_token(
+    request,
+) -> Tuple[Optional[AuthenticatedSupabaseUser], Optional[str], int]:
+    """
+    Validates Supabase Bearer JWT and confirms active `admin` role in `public.profiles`.
+    Returns `(user, None, 200)` on success or `(None, reason, http_status)` on failure.
+    """
+    user, auth_err = verify_supabase_bearer_token(request)
+    if user is None:
+        return None, auth_err, 401
+
+    if not _is_supabase_active_admin(user.user_id):
+        return None, "Forbidden: Only active administrators may archive, restore, or permanently delete missions.", 403
+
+    return user, None, 200
