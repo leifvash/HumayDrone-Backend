@@ -1,8 +1,8 @@
 """
 Python TFLite YOLOv8 Rice Disease Detector (`yolov8n_rice.tflite`).
-Mirrors the exact preprocessing, tensor decoding ([1, 7, 8400], [1, 8400, 7],
-[1, 8, 8400], [1, 8400, 8], [1, 84, 8400]), confidence thresholding, and
-class-aware Non-Maximum Suppression (NMS) from `YoloV8Detector.kt`.
+Mirrors the exact preprocessing, tensor decoding ([1, 6, 8400], [1, 8400, 6],
+[1, 7, 8400], [1, 8400, 7], [1, 8, 8400], [1, 8400, 8], [1, 84, 8400]),
+confidence thresholding, and class-aware Non-Maximum Suppression (NMS) from `YoloV8Detector.kt`.
 """
 import os
 import threading
@@ -48,24 +48,28 @@ class YoloV8TFLiteDetector:
     IOU_THRESHOLD = 0.45
     NUM_THREADS = 4
 
-    # Matches 3 active classes used across mobile edge, cloud backend, and web app.
+    # Matches 2 active classes (Healthy vs Bacterial Leaf Blight) while suppressing legacy channels.
     RAW_LABELS = [
         "Healthy",
         "Bacterial Leaf Blight",
-        "Whitehead",
     ]
 
     LABELS = [
         "Healthy",
         "Bacterial Leaf Blight",
-        "White Head",
+    ]
+
+    LEGACY_3_CLASS_LABELS = [
+        "Healthy",
+        "Bacterial Leaf Blight",
+        None,  # Excluded legacy White Head index 2
     ]
 
     LEGACY_4_CLASS_LABELS = [
         "Healthy",
         "Bacterial Leaf Blight",
         None,  # Excluded legacy Dead Heart index 2
-        "White Head",
+        None,  # Excluded legacy White Head index 3
     ]
 
     def __init__(
@@ -337,8 +341,8 @@ class YoloV8TFLiteDetector:
         iou_threshold: Optional[float] = None,
     ) -> Tuple[List[DetectionResult], Dict[str, Any]]:
         """
-        Decodes output tensor of shape [1, C, N] (e.g. [1, 7, 8400], [1, 8, 8400], [1, 84, 8400])
-        or [1, N, C] (e.g. [1, 8400, 7], [1, 8400, 8], [1, 8400, 84]), matching YoloV8Detector.kt.
+        Decodes output tensor of shape [1, C, N] (e.g. [1, 6, 8400], [1, 7, 8400], [1, 8, 8400], [1, 84, 8400])
+        or [1, N, C] (e.g. [1, 8400, 6], [1, 8400, 7], [1, 8400, 8], [1, 8400, 84]), matching YoloV8Detector.kt.
         """
         conf_thresh = (
             self.confidence_threshold
@@ -390,9 +394,12 @@ class YoloV8TFLiteDetector:
                 "ignored_non_rice_model": True,
             }
 
-        active_labels = (
-            self.LEGACY_4_CLASS_LABELS if feature_classes == 4 else self.LABELS
-        )
+        if feature_classes == 4:
+            active_labels = self.LEGACY_4_CLASS_LABELS
+        elif feature_classes == 3:
+            active_labels = self.LEGACY_3_CLASS_LABELS
+        else:
+            active_labels = self.LABELS
         num_classes = min(len(active_labels), feature_classes)
         class_scores = anchors[:, 4 : 4 + num_classes].copy()
         for col_idx, col_label in enumerate(active_labels[:num_classes]):

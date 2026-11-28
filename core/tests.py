@@ -144,14 +144,13 @@ class HumayDroneBackendTestCase(TestCase):
         self.assertEqual(pdata['mission_id'], mission_uuid)
         self.assertEqual(pdata['total_scanned_count'], 1155)
         self.assertEqual(pdata['blight_count'], 448)
-        self.assertEqual(pdata['whitehead_count'], 4)
+        self.assertEqual(pdata['whitehead_count'], 0)
         self.assertEqual(pdata['healthy_count'], 703)
-        self.assertEqual(pdata['pinpoints_count'], 2)
+        self.assertEqual(pdata['pinpoints_count'], 1)
         codes = [p['code'] for p in pdata['pinpoints']]
-        self.assertIn('BLB-001', codes)
-        self.assertIn('WH-001', codes)
+        self.assertEqual(codes, ['BLB-001'])
         self.assertEqual(pdata['geojson']['type'], 'FeatureCollection')
-        self.assertEqual(len(pdata['geojson']['features']), 2)
+        self.assertEqual(len(pdata['geojson']['features']), 1)
 
     @override_settings(CELERY_TASK_ALWAYS_EAGER=True, SUPABASE_JWT_SECRET="test-jwt-secret-key-at-least-32b")
     def test_review_workflow_report_aggregation_and_mission_link(self):
@@ -208,19 +207,19 @@ class HumayDroneBackendTestCase(TestCase):
         jwt_token = f"{hdr}.{pld}.{base64.urlsafe_b64encode(sig).decode('ascii').rstrip('=')}"
         auth_headers = {"HTTP_AUTHORIZATION": f"Bearer {jwt_token}"}
 
-        # 1. Verify image 0 with label override to White Head + notes
+        # 1. Verify image 0 with label override to Bacterial Leaf Blight + notes
         r0 = self.client.patch(
             f'/api/images/{ids[0]}/review/',
             {
                 'review_status': 'VERIFIED',
-                'reviewed_label': 'Whitehead',
-                'review_notes': 'Panicles fully bleached near paddy bund.',
+                'reviewed_label': 'blb',
+                'review_notes': 'Confirmed yellow-orange leaf blight streaks near paddy bund.',
             },
             format='json',
             **auth_headers,
         )
         self.assertEqual(r0.status_code, status.HTTP_200_OK)
-        self.assertEqual(r0.json()['image']['cloud_result']['reviewed_label'], 'White Head')
+        self.assertEqual(r0.json()['image']['cloud_result']['reviewed_label'], 'Bacterial Leaf Blight')
         self.assertEqual(r0.json()['image']['cloud_result']['reviewed_by'], 'agronomist@humaydrone.test')
 
         # 2. Mark image 1 NEEDS_INSPECTION with note
@@ -247,14 +246,15 @@ class HumayDroneBackendTestCase(TestCase):
         )
         self.assertEqual(r2.status_code, status.HTTP_200_OK)
 
-        # 4. Excluded "Dead Heart" override must return 400
-        bad = self.client.patch(
-            f'/api/images/{ids[0]}/review/',
-            {'review_status': 'VERIFIED', 'reviewed_label': 'Dead Heart'},
-            format='json',
-            **auth_headers,
-        )
-        self.assertEqual(bad.status_code, status.HTTP_400_BAD_REQUEST)
+        # 4. Excluded "Dead Heart" and "White Head" overrides must return 400
+        for rejected_lbl in ('Dead Heart', 'White Head'):
+            bad = self.client.patch(
+                f'/api/images/{ids[0]}/review/',
+                {'review_status': 'VERIFIED', 'reviewed_label': rejected_lbl},
+                format='json',
+                **auth_headers,
+            )
+            self.assertEqual(bad.status_code, status.HTTP_400_BAD_REQUEST)
 
         # 5. Flight analytics report aggregates verified/active captures and excludes REJECTED
         report_resp = self.client.get(f'/api/flights/{self.flight.id}/report/')
@@ -270,7 +270,7 @@ class HumayDroneBackendTestCase(TestCase):
         self.assertEqual(stats['review_breakdown']['REJECTED'], 1)
         self.assertEqual(len(rep['severity_map']['features']), 2)
         self.assertEqual(len(stats['verified_findings']), 1)
-        self.assertEqual(stats['verified_findings'][0]['effective_label'], 'White Head')
+        self.assertEqual(stats['verified_findings'][0]['effective_label'], 'Bacterial Leaf Blight')
         self.assertEqual(len(stats['inspection_checklist']), 1)
 
     @override_settings(CELERY_TASK_ALWAYS_EAGER=True)

@@ -1,9 +1,8 @@
 """
-ResNet-50 deep feature extractor and multi-class classifier for rice discoloration symptoms.
-Targets 3 active classes:
+ResNet-50 deep feature extractor and binary classifier for rice discoloration symptoms.
+Targets 2 active classes:
 0: Healthy
 1: Bacterial Leaf Blight (BLB)
-2: White Head
 
 Implements pure PyTorch residual blocks to eliminate torchvision dependencies and save 110MB RAM.
 """
@@ -41,7 +40,7 @@ if nn is not None:
             return self.relu(out)
 
     class PureResNet50(nn.Module):
-        def __init__(self, num_classes=3):
+        def __init__(self, num_classes=2):
             super().__init__()
             self.inplanes = 64
             self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
@@ -82,7 +81,7 @@ if nn is not None:
             return self.fc(x)
 
     class RiceDiscolorationResNet50(nn.Module):
-        def __init__(self, num_classes=3, pretrained=False):
+        def __init__(self, num_classes=2, pretrained=False):
             super().__init__()
             self.base = PureResNet50(num_classes=num_classes)
 

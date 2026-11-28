@@ -35,11 +35,9 @@ def run_test(image_folder_or_file: str, flight_title: str = "Test Flight - Disea
 
         # If there are many images, select a balanced sample across classes
         if len(image_files) > 15:
-            blight_imgs = [p for p in image_files if "blight" in p.lower() or "bacterial" in p.lower()][:3]
-            whitehead_imgs = [p for p in image_files if "white_head" in p.lower() or "whitehead" in p.lower()][:3]
-            healthy_imgs = [p for p in image_files if "healthy" in p.lower()][:3]
-            deadheart_imgs = [p for p in image_files if "dead" in p.lower() or "heart" in p.lower()][:3]
-            selected = blight_imgs + whitehead_imgs + healthy_imgs + deadheart_imgs
+            blight_imgs = [p for p in image_files if "blight" in p.lower() or "bacterial" in p.lower()][:5]
+            healthy_imgs = [p for p in image_files if "healthy" in p.lower()][:5]
+            selected = blight_imgs + healthy_imgs
             if selected:
                 print(f"[*] Selecting balanced sample of {len(selected)} images across available classes.")
                 image_files = selected
@@ -89,10 +87,6 @@ def run_test(image_folder_or_file: str, flight_title: str = "Test Flight - Disea
         lower_name = (img_path).lower()
         if "bacterial" in lower_name or "blb" in lower_name or "blight" in lower_name:
             label_hint = "Bacterial Leaf Blight"
-        elif "dead" in lower_name or "heart" in lower_name:
-            label_hint = "Dead Heart"
-        elif "white" in lower_name or "head" in lower_name:
-            label_hint = "White Head"
         elif "healthy" in lower_name:
             label_hint = "Healthy"
         else:

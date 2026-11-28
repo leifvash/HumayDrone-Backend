@@ -20,21 +20,17 @@ class CloudInferencePipeline:
     Cloud Inference Engine coordinating:
     1. YOLOv8 (yolov8n_rice.tflite / Ultralytics) - High-resolution anomaly/discoloration detection
     2. U-Net (RiceCanopyUNet) + OpenCV HSV - Pixel-level canopy discoloration segmentation & percentage scoring
-    3. ResNet-50 (RiceDiscolorationResNet50) - Multi-class deep verification (Healthy, BLB, White Head)
+    3. ResNet-50 (RiceDiscolorationResNet50) - Binary deep verification (Healthy vs Bacterial Leaf Blight)
     4. Expert Decision Rules - Prescribing chemical/cultural countermeasures
     """
 
-    DISEASE_CLASSES = ["Healthy", "Bacterial Leaf Blight", "White Head"]
-    ACTIVE_DISEASE_CLASSES = ("Bacterial Leaf Blight", "White Head")
+    DISEASE_CLASSES = ["Healthy", "Bacterial Leaf Blight"]
+    ACTIVE_DISEASE_CLASSES = ("Bacterial Leaf Blight",)
 
     RECOMMENDATIONS = {
         "Bacterial Leaf Blight": (
             "Apply copper-based bactericides (e.g. Copper Hydroxide or Copper Oxychloride). "
             "Ensure proper drainage and avoid excessive nitrogen fertilizer application."
-        ),
-        "White Head": (
-            "Heading-stage Stem Borer damage detected. Empty white panicles identified. "
-            "Record affected spatial coordinates and apply protective biological control or targeted spray."
         ),
         "Healthy": "Canopy is healthy and showing normal vigor. No chemical action required.",
     }
@@ -93,15 +89,12 @@ class CloudInferencePipeline:
             return None
         cleaned = label.strip()
         lower = cleaned.lower()
-        if lower in ("whitehead", "white head", "white_head"):
-            return "White Head"
-        if lower in ("deadheart", "dead heart", "dead_heart"):
+        if lower in ("whitehead", "white head", "white_head", "deadheart", "dead heart", "dead_heart"):
             return None
         if lower in ("blb", "bacterial leaf blight", "bacterial_leaf_blight", "blight"):
             return "Bacterial Leaf Blight"
         if lower == "healthy":
             return "Healthy"
-        # Normalize 4-class legacy ResNet checkpoint onto active 3-class taxonomy if needed
         return cleaned
 
     @staticmethod
@@ -158,7 +151,7 @@ class CloudInferencePipeline:
     ) -> tuple:
         """
         Runs batched ResNet-50 verification over the full image plus up to 6 lesion ROI crops.
-        Maps legacy 4-class checkpoints cleanly onto the 3 active classes when present.
+        Projects legacy 3-class/4-class checkpoints cleanly onto the 2 active classes (Healthy, BLB).
         """
         import torch
 
@@ -199,9 +192,10 @@ class CloudInferencePipeline:
             logits = self.resnet_model(batch_tensor)
             raw_probs = torch.softmax(logits, dim=1).detach().cpu().numpy()
 
-        if raw_probs.shape[1] == 4:
-            # Project legacy [Healthy, BLB, Dead Heart, White Head] -> [Healthy, BLB, White Head]
-            proj = raw_probs[:, [0, 1, 3]]
+        if raw_probs.shape[1] >= 3:
+            # Project legacy 3-class [Healthy, BLB, White Head] or 4-class [Healthy, BLB, Dead Heart, White Head]
+            # onto active 2-class taxonomy [Healthy, Bacterial Leaf Blight]
+            proj = raw_probs[:, [0, 1]]
             row_sums = np.clip(proj.sum(axis=1, keepdims=True), 1e-6, None)
             active_probs = proj / row_sums
         else:
@@ -224,7 +218,7 @@ class CloudInferencePipeline:
         img: np.ndarray,
         green_mask: np.ndarray,
         yb_mask: np.ndarray,
-        white_mask: np.ndarray,
+        white_mask: Optional[np.ndarray],
         yolo_detections: List[Dict[str, Any]],
         image_path: str,
     ) -> tuple:
@@ -239,7 +233,8 @@ class CloudInferencePipeline:
             overlay = img.copy()
             overlay[green_mask] = [0, 210, 0]
             overlay[yb_mask] = [0, 70, 255]
-            overlay[white_mask] = [255, 255, 100]
+            if white_mask is not None:
+                overlay[white_mask] = [255, 255, 100]
 
             vis_mask = cv2.addWeighted(img, 0.6, overlay, 0.4, 0)
             stroke = max(2, int(round(min(width, height) / 450)))
@@ -675,17 +670,18 @@ class CloudInferencePipeline:
             white_mask = hsv_masks["white_mask"]
             green_mask = hsv_masks["green_mask"]
 
-            # Hybrid refinement combining U-Net probability map with HSV+RGB symptom masks
+            # Hybrid refinement combining U-Net probability map with HSV+RGB BLB lesion masks.
+            # Exclude soil, specular glare, and pure bright white reflections while keeping pale straw BLB lesions.
+            bright_white_mask = white_mask & (V >= 220) & (S <= 35)
+            excluded_non_blb = soil_mask | glare_mask | bright_white_mask
             unet_lesion_mask = (
                 (unet_prob_map >= 0.5)
                 & (V >= 30)
                 & (~green_mask)
-                & (~soil_mask)
-                & (~glare_mask)
+                & (~excluded_non_blb)
             )
             if (height * width) >= 500_000 and self.unet_model is not None:
                 unet_support = unet_prob_map >= 0.25
-                strong_bright_white = white_mask & (V >= 220) & (S <= 35)
                 strong_necrotic_yb = (
                     yellow_brown_mask
                     & (H >= 8)
@@ -693,24 +689,19 @@ class CloudInferencePipeline:
                     & (S >= 65)
                     & (V >= 50)
                 )
-                refined_white_mask = (
-                    (white_mask & unet_support)
-                    | strong_bright_white
-                    | (unet_lesion_mask & (V >= 145) & (S <= 85))
-                )
                 refined_yb_mask = (
                     (yellow_brown_mask & unet_support)
                     | (strong_necrotic_yb & (unet_prob_map >= 0.12))
                     | (unet_lesion_mask & (S >= 25))
-                ) & (~refined_white_mask)
+                ) & (~excluded_non_blb)
             else:
-                refined_white_mask = white_mask | (unet_lesion_mask & (V >= 145) & (S <= 85))
-                refined_yb_mask = yellow_brown_mask | (unet_lesion_mask & (S >= 25) & (~refined_white_mask))
-            refined_green_mask = green_mask & (~refined_yb_mask) & (~refined_white_mask)
+                refined_yb_mask = (
+                    yellow_brown_mask | (unet_lesion_mask & (S >= 25))
+                ) & (~excluded_non_blb)
+            refined_green_mask = green_mask & (~refined_yb_mask)
 
             total_green = int(np.sum(refined_green_mask))
             total_yb = int(np.sum(refined_yb_mask))
-            total_white = int(np.sum(refined_white_mask))
 
             combined_boxes = list(edge_boxes) if isinstance(edge_boxes, list) else []
             for d in yolo_detections:
@@ -724,7 +715,7 @@ class CloudInferencePipeline:
                     box_h = max(0, int(round(float(b[3]))) - int(round(float(b[1]))))
                     box_pixels += box_w * box_h
 
-            total_discolored = total_yb + total_white
+            total_discolored = total_yb
             has_disease_hint = (
                 (edge_label in self.ACTIVE_DISEASE_CLASSES)
                 or (yolo_disease_label in self.ACTIVE_DISEASE_CLASSES)
@@ -745,7 +736,7 @@ class CloudInferencePipeline:
             roi_boxes_for_resnet = list(combined_boxes)
             if not roi_boxes_for_resnet and total_discolored > 0:
                 prelim_rois = self._extract_lesion_boxes(
-                    lesion_mask=(refined_yb_mask | refined_white_mask),
+                    lesion_mask=refined_yb_mask,
                     class_index=1,
                     label="Bacterial Leaf Blight",
                     confidence=0.8,
@@ -761,26 +752,9 @@ class CloudInferencePipeline:
         # ------------------------------------------------------------------
         # Stage 4: Multi-Model Decision Fusion & Visual Mask Generation
         # ------------------------------------------------------------------
-        white_ratio = total_white / (total_discolored + 1e-5)
-        white_min_pixels = min(2500, max(100, int(total_canopy * 0.03)))
         unet_mean_act = float(np.mean(unet_prob_map))
-
-        # Distinguish pure bright bleached white from dull gray-tan reflections
-        bright_white_px = int(np.sum(refined_white_mask & (V >= 220) & (S <= 35)))
-        bright_white_dom = (
-            total_white > 0 and (bright_white_px / float(total_white)) >= 0.65
-        )
-        strong_hsv_white = (
-            total_white > white_min_pixels
-            and white_ratio >= 0.35
-            and (float(resnet_probs[2]) >= 0.22 or bright_white_dom)
-        )
-
-        # Top disease candidate among ResNet-50's 2 disease classes [BLB, White Head]
-        resnet_disease_probs = resnet_probs[1:3]
-        best_disease_subidx = int(np.argmax(resnet_disease_probs))
-        resnet_best_disease_label = self.DISEASE_CLASSES[1 + best_disease_subidx]
-        resnet_best_disease_prob = float(resnet_disease_probs[best_disease_subidx])
+        resnet_healthy_prob = float(resnet_probs[0])
+        resnet_blb_prob = float(resnet_probs[1]) if len(resnet_probs) > 1 else 0.0
 
         has_explicit_edge_boxes = bool(edge_boxes) and box_pixels > 0
 
@@ -790,18 +764,16 @@ class CloudInferencePipeline:
             and resnet_label == "Healthy"
             and (
                 (
-                    float(resnet_probs[0]) >= 0.60
+                    resnet_healthy_prob >= 0.60
                     and unet_mean_act < 0.05
-                    and not strong_hsv_white
                 )
                 or (
-                    float(resnet_probs[0]) >= 0.75
+                    resnet_healthy_prob >= 0.75
                     and unet_mean_act < 0.05
                     and severity_score < 12.0
                 )
                 or (
-                    not strong_hsv_white
-                    and resnet_best_disease_prob < 0.15
+                    resnet_blb_prob < 0.15
                     and unet_mean_act < 0.05
                 )
             )
@@ -813,58 +785,36 @@ class CloudInferencePipeline:
             confidence = min(
                 0.99,
                 max(
-                    float(resnet_probs[0]),
+                    resnet_healthy_prob,
                     yolo_top_conf if yolo_top_label == "Healthy" else 0.0,
                     0.50 if self.resnet_model is None else 0.0,
                 ),
             )
         else:
-            if (
-                yolo_disease_label == "White Head"
-                or (resnet_label == "White Head" and resnet_conf >= 0.40)
-                or strong_hsv_white
-            ):
-                classification = "White Head"
-            elif yolo_disease_label in self.ACTIVE_DISEASE_CLASSES:
-                classification = yolo_disease_label
-            elif resnet_label in self.ACTIVE_DISEASE_CLASSES and resnet_conf >= 0.40:
-                classification = resnet_label
-            elif has_explicit_edge_boxes and edge_label in self.ACTIVE_DISEASE_CLASSES:
-                classification = edge_label
-            elif total_white > white_min_pixels and white_ratio >= 0.25 and float(resnet_probs[2]) >= 0.22:
-                classification = "White Head"
-            elif resnet_best_disease_prob >= 0.20:
-                classification = resnet_best_disease_label
-            elif edge_label in self.ACTIVE_DISEASE_CLASSES:
-                classification = edge_label
-            else:
-                classification = "Bacterial Leaf Blight"
-
-            cls_idx = self.DISEASE_CLASSES.index(classification)
-            resnet_cls_prob = float(resnet_probs[cls_idx])
+            classification = "Bacterial Leaf Blight"
             if self.resnet_model is not None:
                 neural_conf = max(
-                    resnet_cls_prob,
-                    yolo_disease_conf if yolo_disease_label == classification else 0.0,
+                    resnet_blb_prob,
+                    yolo_disease_conf if yolo_disease_label == "Bacterial Leaf Blight" else 0.0,
                 )
-                if has_explicit_edge_boxes and edge_label == classification:
+                if has_explicit_edge_boxes and edge_label == "Bacterial Leaf Blight":
                     confidence = min(0.99, max(neural_conf, edge_conf))
                 else:
-                    confidence = min(0.99, max(neural_conf, 0.35 if strong_hsv_white else 0.0))
+                    confidence = min(0.99, neural_conf)
             else:
                 confidence = min(
                     0.99,
                     max(
-                        edge_conf if edge_label == classification else 0.0,
-                        yolo_disease_conf if yolo_disease_label == classification else 0.0,
+                        edge_conf if edge_label == "Bacterial Leaf Blight" else 0.0,
+                        yolo_disease_conf if yolo_disease_label == "Bacterial Leaf Blight" else 0.0,
                         0.78 + (severity_score / 100.0) * 0.21,
                     ),
                 )
 
-        # Populate or supplement lesion bounding boxes from the refined segmentation mask
+        # Populate or supplement lesion bounding boxes from the refined BLB segmentation mask
         if classification != "Healthy":
             cls_idx = self.DISEASE_CLASSES.index(classification)
-            target_lesion_mask = refined_yb_mask | refined_white_mask
+            target_lesion_mask = refined_yb_mask
             lesion_boxes = self._extract_lesion_boxes(
                 lesion_mask=target_lesion_mask,
                 class_index=cls_idx,
@@ -928,7 +878,7 @@ class CloudInferencePipeline:
             img=img,
             green_mask=refined_green_mask,
             yb_mask=refined_yb_mask,
-            white_mask=refined_white_mask,
+            white_mask=None,
             yolo_detections=yolo_detections,
             image_path=image_path,
         )
@@ -961,8 +911,8 @@ class CloudInferencePipeline:
         """
         Real pixel-level canopy discoloration segmentation and dynamic severity scoring.
         Formula:
-            Severity % = (Discolored Canopy Pixels / Total Canopy Pixels) * 100
-        Analyzes healthy green canopy vs necrotic/yellow-brown and bleached whitehead discoloration.
+            Severity % = (Discolored BLB Canopy Pixels / Total Canopy Pixels) * 100
+        Analyzes healthy green canopy vs necrotic/yellow-brown BLB discoloration.
         """
         edge_label, edge_conf, edge_boxes = self._parse_edge_detections(edge_detections)
 
@@ -984,12 +934,10 @@ class CloudInferencePipeline:
 
         hsv_masks = self._compute_hsv_masks(img)
         yellow_brown_mask = hsv_masks["yellow_brown_mask"]
-        white_mask = hsv_masks["white_mask"]
         green_mask = hsv_masks["green_mask"]
 
         total_green = int(np.sum(green_mask))
         total_yb = int(np.sum(yellow_brown_mask))
-        total_white = int(np.sum(white_mask))
 
         box_pixels = 0
         if edge_boxes and isinstance(edge_boxes, list):
@@ -999,8 +947,8 @@ class CloudInferencePipeline:
                     box_h = max(0, int(round(float(b[3]))) - int(round(float(b[1]))))
                     box_pixels += (box_w * box_h)
 
-        total_discolored = total_yb + total_white
-        if box_pixels > 0 and total_discolored == 0 and edge_label != "Healthy":
+        total_discolored = total_yb
+        if box_pixels > 0 and total_discolored == 0 and edge_label in self.ACTIVE_DISEASE_CLASSES:
             total_discolored = box_pixels
 
         total_canopy = total_green + total_discolored
@@ -1010,30 +958,19 @@ class CloudInferencePipeline:
             raw_severity = (total_discolored / total_canopy) * 100.0
             severity_score = round(min(100.0, raw_severity), 2)
 
-        white_ratio = total_white / (total_discolored + 1e-5)
-        white_min_pixels = min(2500, max(100, int(total_canopy * 0.03)))
-
         if severity_score < 0.85 and not (edge_label in self.ACTIVE_DISEASE_CLASSES and box_pixels > 0):
             classification = "Healthy"
             severity_score = 0.0
             confidence = 0.96
         else:
-            if total_white > white_min_pixels and white_ratio >= 0.35:
-                classification = "White Head"
-            elif edge_label in self.ACTIVE_DISEASE_CLASSES:
-                classification = edge_label
-            elif total_white > white_min_pixels and white_ratio >= 0.18:
-                classification = "White Head"
-            else:
-                classification = "Bacterial Leaf Blight"
-
-            confidence = min(0.99, max(edge_conf, 0.78 + (severity_score / 100.0) * 0.21))
+            classification = "Bacterial Leaf Blight"
+            confidence = min(0.99, max(edge_conf if edge_label == "Bacterial Leaf Blight" else 0.0, 0.78 + (severity_score / 100.0) * 0.21))
 
         yolo_detections: List[Dict[str, Any]] = []
         if classification != "Healthy":
             cls_idx = self.DISEASE_CLASSES.index(classification)
             yolo_detections = self._extract_lesion_boxes(
-                lesion_mask=(yellow_brown_mask | white_mask),
+                lesion_mask=yellow_brown_mask,
                 class_index=cls_idx,
                 label=classification,
                 confidence=confidence,
@@ -1047,7 +984,7 @@ class CloudInferencePipeline:
             img=img,
             green_mask=green_mask,
             yb_mask=yellow_brown_mask,
-            white_mask=white_mask,
+            white_mask=None,
             yolo_detections=yolo_detections,
             image_path=image_path,
         )

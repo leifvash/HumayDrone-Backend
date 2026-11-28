@@ -41,7 +41,7 @@ class SurveyMission(models.Model):
         ordering = ['-captured_at']
 
     def __str__(self):
-        return f"{self.title} ({self.total_scanned_count} scanned, {self.blight_count} BLB, {self.whitehead_count} Whitehead)"
+        return f"{self.title} ({self.total_scanned_count} scanned, {self.blight_count} BLB)"
 
 
 class DroneFlight(models.Model):

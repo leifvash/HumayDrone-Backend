@@ -29,7 +29,7 @@ if nn is not None:
         """
         U-Net network predicting binary discoloration masks:
         0: Healthy Canopy / Background
-        1: Discolored Lesion (Bacterial Leaf Blight / White Head)
+        1: Discolored Lesion (Bacterial Leaf Blight)
         """
         def __init__(self, in_channels=3, out_channels=1):
             super().__init__()

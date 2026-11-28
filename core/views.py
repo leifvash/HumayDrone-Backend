@@ -139,18 +139,16 @@ class SurveyMissionViewSet(viewsets.ModelViewSet):
 
         grouped = {}
         blb_seq = 0
-        wh_seq = 0
 
         for idx, pt in enumerate(raw_points):
             if not isinstance(pt, dict):
                 continue
             label_raw = str(pt.get('disease_label') or pt.get('diseaseLabel') or 'Healthy')
             label_lower = label_raw.lower()
-            if 'healthy' in label_lower or 'dead' in label_lower:
+            if 'healthy' in label_lower or 'dead' in label_lower or 'white' in label_lower:
                 continue
 
-            is_wh = 'white' in label_lower
-            norm_label = 'White Head' if is_wh else 'Bacterial Leaf Blight'
+            norm_label = 'Bacterial Leaf Blight'
             lat = float(pt.get('lat', 0.0))
             lng = float(pt.get('lng', 0.0))
             conf = float(pt.get('confidence', 0.0))
@@ -158,12 +156,8 @@ class SurveyMissionViewSet(viewsets.ModelViewSet):
 
             key = f"{norm_label}:{lat:.8f},{lng:.8f}"
             if key not in grouped:
-                if is_wh:
-                    wh_seq += 1
-                    code = f"WH-{wh_seq:03d}"
-                else:
-                    blb_seq += 1
-                    code = f"BLB-{blb_seq:03d}"
+                blb_seq += 1
+                code = f"BLB-{blb_seq:03d}"
                 grouped[key] = {
                     "id": key,
                     "code": code,
@@ -204,7 +198,7 @@ class SurveyMissionViewSet(viewsets.ModelViewSet):
             "title": mission.title,
             "total_scanned_count": mission.total_scanned_count,
             "blight_count": mission.blight_count,
-            "whitehead_count": mission.whitehead_count,
+            "whitehead_count": 0,
             "healthy_count": mission.healthy_count,
             "average_confidence": mission.average_confidence,
             "center_lat": mission.center_lat,
@@ -386,9 +380,6 @@ _VALID_DIAGNOSTIC_LABELS = {
     "blight": "Bacterial Leaf Blight",
     "bacterial leaf blight": "Bacterial Leaf Blight",
     "bacterial_leaf_blight": "Bacterial Leaf Blight",
-    "whitehead": "White Head",
-    "white head": "White Head",
-    "white_head": "White Head",
 }
 
 
@@ -787,15 +778,10 @@ def _compute_and_store_flight_report(flight: DroneFlight) -> AnalyticsReport:
     }
 
     blb_count = disease_counts.get("Bacterial Leaf Blight", 0)
-    wh_count = disease_counts.get("White Head", 0) + disease_counts.get("Whitehead", 0)
     advice_parts = []
     if blb_count > 0:
         advice_parts.append(
             f"{blb_count} capture(s) flagged Bacterial Leaf Blight — inspect leaf lesions, improve paddy drainage, and schedule copper-based bactericide only on confirmed plots."
-        )
-    if wh_count > 0:
-        advice_parts.append(
-            f"{wh_count} capture(s) flagged White Head — verify bleached panicles at listed GPS pinpoints and target localized stem borer management."
         )
     if inspection_checklist:
         advice_parts.append(
@@ -822,7 +808,7 @@ def _compute_and_store_flight_report(flight: DroneFlight) -> AnalyticsReport:
 class ImageReviewView(APIView):
     """
     Persists technician detection verification status (`PENDING`, `VERIFIED`,
-    `NEEDS_INSPECTION`, `REJECTED`), diagnostic notes, and optional 3-class label override.
+    `NEEDS_INSPECTION`, `REJECTED`), diagnostic notes, and optional 2-class label override.
     Requires a valid Supabase Bearer JWT (`Authorization: Bearer <token>`).
     """
     def patch(self, request, image_id, *args, **kwargs):
@@ -855,7 +841,7 @@ class ImageReviewView(APIView):
             norm_lbl = _normalize_review_label('' if raw_lbl is None else str(raw_lbl))
             if norm_lbl is None:
                 return Response(
-                    {"error": "Invalid reviewed_label. Allowed: Healthy, Bacterial Leaf Blight, White Head, or empty string."},
+                    {"error": "Invalid reviewed_label. Allowed: Healthy, Bacterial Leaf Blight, or empty string."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             cloud_result.reviewed_label = norm_lbl

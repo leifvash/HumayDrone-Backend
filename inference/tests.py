@@ -62,7 +62,14 @@ class CloudNeuralInferenceTests(TestCase):
         self.assertIn("max_confidence", summary)
         self.assertEqual(summary["num_anchors"], 8400)
 
-        # 2. Test decoding channels-first [1, 7, 8400] and [1, 8, 8400]
+        # 2. Test decoding channels-first [1, 6, 8400] (2-class) and [1, 7, 8400] (legacy 3-class)
+        tensor_cf6 = np.zeros((1, 6, 8400), dtype=np.float32)
+        tensor_cf6[0, 0:4, 8] = [0.5, 0.5, 0.2, 0.2]
+        tensor_cf6[0, 4 + 1, 8] = 0.90  # BLB
+        decoded_cf6, _ = detector.decode_output(tensor_cf6, orig_width=1000, orig_height=500)
+        self.assertEqual(len(decoded_cf6), 1)
+        self.assertEqual(decoded_cf6[0].label, "Bacterial Leaf Blight")
+
         tensor_cf7 = np.zeros((1, 7, 8400), dtype=np.float32)
         # Anchor 10: normalized coords [0.5, 0.5, 0.2, 0.2], class 1 (BLB) score = 0.88
         tensor_cf7[0, 0:4, 10] = [0.5, 0.5, 0.2, 0.2]
@@ -70,9 +77,9 @@ class CloudNeuralInferenceTests(TestCase):
         # Anchor 11: overlapping same-class box with lower confidence = 0.60 (should be suppressed by NMS)
         tensor_cf7[0, 0:4, 11] = [0.51, 0.50, 0.2, 0.2]
         tensor_cf7[0, 4 + 1, 11] = 0.60
-        # Anchor 20: below threshold (0.30 < 0.45)
+        # Anchor 20: legacy class 2 ("White Head") must be suppressed even above threshold
         tensor_cf7[0, 0:4, 20] = [0.2, 0.2, 0.1, 0.1]
-        tensor_cf7[0, 4 + 2, 20] = 0.30
+        tensor_cf7[0, 4 + 2, 20] = 0.93
 
         decoded_cf7, _ = detector.decode_output(tensor_cf7, orig_width=1000, orig_height=500)
         self.assertEqual(len(decoded_cf7), 1)
@@ -85,14 +92,16 @@ class CloudNeuralInferenceTests(TestCase):
 
         # 3. Test decoding channels-last [1, 8400, 8] with pixel-scale coordinates
         tensor_cl8 = np.zeros((1, 8400, 8), dtype=np.float32)
-        tensor_cl8[0, 42, 0:4] = [320.0, 320.0, 128.0, 128.0]
-        tensor_cl8[0, 42, 4 + 3] = 0.91  # Legacy class 3: White Head
-        # Legacy class 2 ("Dead Heart") must be suppressed
+        tensor_cl8[0, 41, 0:4] = [320.0, 320.0, 128.0, 128.0]
+        tensor_cl8[0, 41, 4 + 1] = 0.91  # Class 1: Bacterial Leaf Blight
+        # Legacy class 2 ("Dead Heart") and legacy class 3 ("White Head") must both be suppressed
+        tensor_cl8[0, 42, 0:4] = [200.0, 200.0, 100.0, 100.0]
+        tensor_cl8[0, 42, 4 + 3] = 0.94
         tensor_cl8[0, 43, 0:4] = [100.0, 100.0, 64.0, 64.0]
         tensor_cl8[0, 43, 4 + 2] = 0.95
         decoded_cl8, _ = detector.decode_output(tensor_cl8, orig_width=640, orig_height=640)
         self.assertEqual(len(decoded_cl8), 1)
-        self.assertEqual(decoded_cl8[0].label, "White Head")
+        self.assertEqual(decoded_cl8[0].label, "Bacterial Leaf Blight")
         self.assertAlmostEqual(decoded_cl8[0].confidence, 0.91, places=4)
         self.assertAlmostEqual(decoded_cl8[0].box[0], 256.0, places=1)
         self.assertAlmostEqual(decoded_cl8[0].box[2], 384.0, places=1)
@@ -105,11 +114,11 @@ class CloudNeuralInferenceTests(TestCase):
         self.assertEqual(len(decoded_coco), 0)
         self.assertTrue(summary_coco.get("ignored_non_rice_model"))
 
-        # 5. Test 3-class PyTorch ResNet-50 architecture instantiation
-        resnet_3cls = RiceDiscolorationResNet50(num_classes=3, pretrained=False)
+        # 5. Test 2-class PyTorch ResNet-50 architecture instantiation
+        resnet_2cls = RiceDiscolorationResNet50(num_classes=2, pretrained=False)
         sample_batch = torch.zeros((2, 3, 224, 224), dtype=torch.float32)
-        logits_3cls = resnet_3cls(sample_batch)
-        self.assertEqual(tuple(logits_3cls.shape), (2, 3))
+        logits_2cls = resnet_2cls(sample_batch)
+        self.assertEqual(tuple(logits_2cls.shape), (2, 2))
 
         # 6. Test RiceCanopyUNet forward_logits preserves shape and probability bounds
         unet_net = RiceCanopyUNet()
@@ -138,20 +147,20 @@ class CloudNeuralInferenceTests(TestCase):
             blight_res["unet_mean_activation"],
             healthy_res["unet_mean_activation"],
         )
+        self.assertEqual(
+            set(blight_res["resnet_probabilities"].keys()),
+            {"Healthy", "Bacterial Leaf Blight"},
+        )
         self.assertGreater(
             blight_res["resnet_probabilities"]["Bacterial Leaf Blight"],
             0.5,
         )
 
+        # Even if a legacy Whitehead image is supplied, Cloud never classifies it as White Head
         self.assertEqual(whitehead_res["status"], "COMPLETED")
-        self.assertEqual(whitehead_res["classification_label"], "White Head")
-        self.assertGreater(whitehead_res["severity_score"], 0.0)
-        self.assertGreater(
-            whitehead_res["resnet_probabilities"]["White Head"],
-            0.5,
-        )
+        self.assertIn(whitehead_res["classification_label"], ("Healthy", "Bacterial Leaf Blight"))
 
-    def test_edge_cases_missing_image_and_excluded_dead_heart(self):
+    def test_edge_cases_missing_image_and_excluded_classes(self):
         # Missing image path should return graceful COMPLETED fallback for active classes
         missing_res = self.pipeline._run_real_models(
             "non_existent_path_12345.jpg",
@@ -160,15 +169,16 @@ class CloudNeuralInferenceTests(TestCase):
         self.assertEqual(missing_res["status"], "COMPLETED")
         self.assertEqual(missing_res["classification_label"], "Bacterial Leaf Blight")
 
-        # Excluded legacy "Dead Heart" hint on missing image normalizes to Healthy (never Dead Heart)
-        excluded_res = self.pipeline._run_real_models(
-            "non_existent_path_12345.jpg",
-            edge_detections=[{"label": "Dead Heart", "confidence": 0.92}],
-        )
-        self.assertEqual(excluded_res["status"], "COMPLETED")
-        self.assertEqual(excluded_res["classification_label"], "Healthy")
+        # Excluded legacy "Dead Heart" and "White Head" hints on missing image normalize to Healthy
+        for legacy_label in ("Dead Heart", "White Head", "Whitehead"):
+            excluded_res = self.pipeline._run_real_models(
+                "non_existent_path_12345.jpg",
+                edge_detections=[{"label": legacy_label, "confidence": 0.92}],
+            )
+            self.assertEqual(excluded_res["status"], "COMPLETED")
+            self.assertEqual(excluded_res["classification_label"], "Healthy")
 
-        # Synthetic discolored lesion image maps cleanly onto 3-class taxonomy and emits JPEG mask bytes
+        # Synthetic discolored lesion image maps cleanly onto 2-class taxonomy and emits JPEG mask bytes
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             tmp_path = tmp.name
         try:
@@ -178,8 +188,7 @@ class CloudNeuralInferenceTests(TestCase):
 
             res = self.pipeline.process_image(tmp_path)
             self.assertEqual(res["status"], "COMPLETED")
-            self.assertIn(res["classification_label"], ("Bacterial Leaf Blight", "White Head"))
-            self.assertNotEqual(res["classification_label"], "Dead Heart")
+            self.assertEqual(res["classification_label"], "Bacterial Leaf Blight")
             self.assertGreater(res["severity_score"], 0.0)
             self.assertTrue(len(res["yolo_detections"]) > 0)
             self.assertTrue(isinstance(res.get("mask_bytes"), bytes) and len(res["mask_bytes"]) > 0)
@@ -193,7 +202,7 @@ class CloudNeuralInferenceTests(TestCase):
         self.assertIsInstance(dets_large, list)
         self.assertIn("max_confidence", summary_large)
 
-    def test_unicode_paths_small_whitehead_and_zero_score_anchors(self):
+    def test_unicode_paths_bright_reflection_exclusion_and_zero_score_anchors(self):
         # 1. Zero-score anchors must not pass even at confidence_threshold=0.0 (matching YoloV8Detector.kt)
         detector = self.pipeline.yolo_tflite_detector
         zero_tensor = np.zeros((1, 7, 8400), dtype=np.float32)
@@ -208,7 +217,7 @@ class CloudNeuralInferenceTests(TestCase):
         self.assertIsInstance(detector.detect(gray_2d), list)
         self.assertIsInstance(detector.detect(bgra_4ch), list)
 
-        # 3. Small / low-saturation White Head image (128x128 where white pixels < 2500 and S < 30)
+        # 3. Bright white non-BLB reflection/patch on green canopy must NOT emit White Head
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             wh_path = tmp.name
         try:
@@ -217,8 +226,8 @@ class CloudNeuralInferenceTests(TestCase):
             cv2.imwrite(wh_path, wh_small)
             wh_res = self.pipeline._run_real_models(wh_path)
             self.assertEqual(wh_res["status"], "COMPLETED")
-            self.assertEqual(wh_res["classification_label"], "White Head")
-            self.assertGreater(wh_res["severity_score"], 5.0)
+            self.assertEqual(wh_res["classification_label"], "Healthy")
+            self.assertEqual(wh_res["severity_score"], 0.0)
         finally:
             if os.path.exists(wh_path):
                 os.remove(wh_path)
@@ -259,7 +268,7 @@ class CloudNeuralInferenceTests(TestCase):
             return buf
 
         with override_settings(CELERY_TASK_ALWAYS_EAGER=True):
-            # 1. Dict edge_detections + blank coordinate strings + RGBA PNG
+            # 1. Dict edge_detections + blank coordinate strings + RGBA PNG (legacy Whitehead hint -> Healthy)
             resp1 = client.post(
                 "/api/images/upload/",
                 {
@@ -278,7 +287,7 @@ class CloudNeuralInferenceTests(TestCase):
             img1_id = resp1.json()["image_id"]
             res1 = CloudInferenceResult.objects.get(image_id=img1_id)
             self.assertEqual(res1.status, "COMPLETED")
-            self.assertEqual(res1.classification_label, "White Head")
+            self.assertEqual(res1.classification_label, "Healthy")
 
             # 2. '[null]' edge_detections + Grayscale PNG + retry endpoint
             resp2 = client.post(
@@ -326,7 +335,7 @@ class CloudNeuralInferenceTests(TestCase):
             with patch.object(
                 self.pipeline,
                 "_run_resnet_with_rois",
-                return_value=(np.array([0.92, 0.04, 0.04], dtype=np.float32), "Healthy", 0.92),
+                return_value=(np.array([0.92, 0.08], dtype=np.float32), "Healthy", 0.92),
             ), patch.object(
                 self.pipeline,
                 "unet_model",
@@ -343,7 +352,7 @@ class CloudNeuralInferenceTests(TestCase):
             if os.path.exists(speck_path):
                 os.remove(speck_path)
 
-        # 3. Dull pale reflections must NOT override ResNet BLB into false White Head
+        # 3. Dull pale reflections must stay in 2-class taxonomy and never emit White Head
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             blb_pale_path = tmp.name
         try:
@@ -354,7 +363,7 @@ class CloudNeuralInferenceTests(TestCase):
             with patch.object(
                 self.pipeline,
                 "_run_resnet_with_rois",
-                return_value=(np.array([0.30, 0.62, 0.08], dtype=np.float32), "Bacterial Leaf Blight", 0.62),
+                return_value=(np.array([0.35, 0.65], dtype=np.float32), "Bacterial Leaf Blight", 0.65),
             ):
                 res_blb = self.pipeline._run_real_models(blb_pale_path)
             self.assertEqual(res_blb["classification_label"], "Bacterial Leaf Blight")
@@ -372,7 +381,7 @@ class CloudNeuralInferenceTests(TestCase):
         from core.models import DroneFlight, CloudInferenceResult, EdgeInferenceResult
 
         # 1. High-res aerial frame where Edge guessed "White Head" (no boxes)
-        #    but ResNet-50 sees Healthy (0.82) & U-Net activation is low -> Cloud corrects to Healthy.
+        #    but ResNet-50 sees Healthy (0.85) & U-Net activation is low -> Cloud corrects to Healthy.
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             aerial_path = tmp.name
         try:
@@ -383,7 +392,7 @@ class CloudNeuralInferenceTests(TestCase):
             with patch.object(
                 self.pipeline,
                 "_run_resnet_with_rois",
-                return_value=(np.array([0.82, 0.13, 0.05], dtype=np.float32), "Healthy", 0.82),
+                return_value=(np.array([0.85, 0.15], dtype=np.float32), "Healthy", 0.85),
             ):
                 res_override = self.pipeline._run_real_models(
                     aerial_path,
@@ -391,7 +400,7 @@ class CloudNeuralInferenceTests(TestCase):
                 )
             self.assertEqual(res_override["classification_label"], "Healthy")
             self.assertEqual(res_override["severity_score"], 0.0)
-            self.assertAlmostEqual(res_override["confidence_score"], 0.82, places=2)
+            self.assertAlmostEqual(res_override["confidence_score"], 0.85, places=2)
 
             # 2. When lesion pixels exist and ResNet-50 predicts BLB (0.52) against an edge White Head
             #    hint (no boxes), Cloud chooses BLB with calibrated ~0.52 confidence (not >= 0.78 floor).
@@ -401,7 +410,7 @@ class CloudNeuralInferenceTests(TestCase):
             with patch.object(
                 self.pipeline,
                 "_run_resnet_with_rois",
-                return_value=(np.array([0.42, 0.52, 0.06], dtype=np.float32), "Bacterial Leaf Blight", 0.52),
+                return_value=(np.array([0.48, 0.52], dtype=np.float32), "Bacterial Leaf Blight", 0.52),
             ), patch.object(
                 self.pipeline,
                 "yolo_tflite_detector",
